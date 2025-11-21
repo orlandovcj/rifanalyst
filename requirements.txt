@@ -5,3 +5,4 @@ plotly
 networkx 
 python-louvain 
 pyvis
+wordcloud
