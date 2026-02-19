@@ -3521,103 +3521,92 @@ if st.session_state.data_loaded:
             """)
         # --- FIM DA SEÇÃO DE AJUDA ---
 
-        if "df_final" not in st.session_state or st.session_state.df_final is None:
-            st.info("Aguardando carregamento de dados...")
-        else:
-            with st.spinner("Calculando Score de Risco Integrado..."):
-                # A. Obter indicadores quantitativos básicos
-                df_env_base = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
+        if "df_final" in st.session_state:
+            with st.spinner("Consolidando Score de Risco..."):
+                # A. Indicadores Matemáticos
+                df_env_math = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
                 
-                # B. Obter todos os alertas detalhados
+                # B. Alertas Qualitativos (Função do script principal)
                 df_alertas_brutos = analyze_suspicious_patterns(
-                    df_display, # Usa os dados filtrados na barra lateral
-                    st.session_state.df_ocorrencias,
-                    st.session_state.df_comunicacoes,
-                    st.session_state.df_envolvidos
+                    df_display, st.session_state.df_ocorrencias,
+                    st.session_state.df_comunicacoes, st.session_state.df_envolvidos
                 )
 
-                # C. Consolidar pontos por CPF
+                # C. Cruzamento de Dados
                 if not df_alertas_brutos.empty:
                     df_resumo_alertas = df_alertas_brutos.groupby('cpfCnpj').agg(
-                        Score_Qualitativo=('Pontos', 'sum'),
+                        Score_Quali=('Pontos', 'sum'),
                         Qtd_Alertas=('Motivo', 'count')
                     ).reset_index()
+                    df_ranking = pd.merge(df_env_math, df_resumo_alertas, left_on='cpfCnpjEnvolvido', right_on='cpfCnpj', how='left').fillna(0)
                 else:
-                    df_resumo_alertas = pd.DataFrame(columns=['cpfCnpj', 'Score_Qualitativo', 'Qtd_Alertas'])
+                    df_ranking = df_env_math.assign(Score_Quali=0, Qtd_Alertas=0)
 
-                # D. Cruzar Indicadores com Alertas
-                df_ranking = pd.merge(
-                    df_env_base, 
-                    df_resumo_alertas, 
-                    left_on='cpfCnpjEnvolvido', 
-                    right_on='cpfCnpj', 
-                    how='left'
-                ).fillna(0)
+                # D. Aplicação das Regras de Score
+                df_ranking['ScoreTotal'] = df_ranking['Score_Quali']
+                df_ranking['ScoreTotal'] += df_ranking['flag_pep'].astype(int) * 5
+                df_ranking['ScoreTotal'] += df_ranking['flag_servidor'].astype(int) * 5
+                df_ranking['ScoreTotal'] += (df_ranking['hhi_contrapartes'] > 0.6).astype(int) * 10
+                df_ranking['ScoreTotal'] += df_ranking['fracionamento_dias_com_3+_ops'] * 2
 
-                # E. Regra de Score Total (Personalizável)
-                # Soma pontos qualitativos + pontos por PEP/Servidor/Concentração
-                df_ranking['ScoreTotal'] = df_ranking['Score_Qualitativo'] + \
-                                          (df_ranking['flag_pep'].astype(int) * 5) + \
-                                          (df_ranking['flag_servidor'].astype(int) * 5)
-
-                # Ordenar e preparar para exibição
                 df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
                 df_ranking.insert(0, "Pos.", range(1, len(df_ranking) + 1))
 
-                # F. Tabela Interativa (Habilita Seleção)
-                st.subheader("Classificação Geral")
-                st.caption("Selecione uma linha para detalhar os padrões identificados.")
-                config_visual = {
-                    "Pos.": st.column_config.NumberColumn("Pos.", width="small"),
-                    "ScoreTotal": st.column_config.ProgressColumn("Score de Risco", format="%d pts", min_value=0, max_value=int(df_ranking['ScoreTotal'].max() if not df_ranking.empty else 100)),
-                    "valor_total": st.column_config.NumberColumn("Valor Total", format="R$ %.2f")
-                }
+                # E. Tabela de Ranking Interativa (Formatada BRL)
+                st.subheader("Classificação de Risco")
+                st.caption("Clique em uma linha para ver os padrões detalhados do envolvido abaixo.")
                 
-                # Exibir dataframe com modo de seleção
-                ranking_selection = st.dataframe(
-                    df_ranking[["Pos.", "cpfCnpjEnvolvido", "nomeEnvolvido", "ScoreTotal", "n_comunicacoes", "valor_total"]].head(100),
-                    use_container_width=True,
+                # Selecionamos as colunas
+                df_to_show = df_ranking[["Pos.", "cpfCnpjEnvolvido", "nomeEnvolvido", "n_comunicacoes", "ScoreTotal", "valor_total"]].head(100)
+
+                # Aplicamos a formatação brasileira via Styler do Pandas
+                df_styled = df_to_show.style.format({
+                    "valor_total": lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                })
+
+                sel_rank = st.dataframe(
+                    df_styled,
+                    use_container_width=True, 
                     hide_index=True,
-                    column_config=config_visual,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    key="ranking_env_table"
+                    on_select="rerun", 
+                    selection_mode="single-row", 
+                    key="rank_table_select",
+                    column_config={
+                        "n_comunicacoes": "Qtd. Com.",
+                        "ScoreTotal": st.column_config.ProgressColumn(
+                            "Score", 
+                            format="%d pts", 
+                            min_value=0, 
+                            max_value=int(df_ranking['ScoreTotal'].max())
+                        ),
+                        "valor_total": st.column_config.NumberColumn("Valor Total") 
+                    }
                 )
 
-                # G. Gráfico de Dispersão
+                # F. Gráfico
                 fig_risk = px.scatter(df_ranking.head(30), x='valor_total', y='ScoreTotal', size='ScoreTotal', color='ScoreTotal',
-                                    hover_name='nomeEnvolvido', title="Relação: Volume Financeiro vs. Score de Risco")
+                                     hover_name='nomeEnvolvido', title="Dispersão: Valor vs Score")
                 st.plotly_chart(fig_risk, use_container_width=True)
 
-                # H. Lógica de Exibição de Detalhes ao Selecionar Linha
-                selection = ranking_selection.get("selection", {})
-                if selection and selection.get("rows"):
-                    row_idx = selection["rows"][0]
-                    # Pegar dados do envolvido selecionado
-                    alvo_selecionado = df_ranking.iloc[row_idx]
-                    sel_cpf = alvo_selecionado["cpfCnpjEnvolvido"]
-                    sel_nome = alvo_selecionado["nomeEnvolvido"]
+                # G. DETALHAMENTO AO SELECIONAR (Tabela solicitada)
+                selection = sel_rank.get("selection", {}).get("rows", [])
+                if selection:
+                    row_idx = selection[0]
+                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
+                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
 
                     st.markdown("---")
-                    st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
+                    st.subheader(f"🔍 Padrões Identificados: {sel_nome}")
                     
-                    # Filtrar a lista bruta de alertas apenas para este CPF/CNPJ
                     detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
-                    
                     if not detalhes_alvo.empty:
                         st.dataframe(
-                            detalhes_alvo[['Indexador', 'idComunicacao', 'cpfCnpj', 'Nome', 'Motivo', 'Risco']],
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Motivo": st.column_config.TextColumn("Motivo", width="large"),
-                                "Risco": st.column_config.TextColumn("Risco", width="small")
-                            }
+                            detalhes_alvo[['Indexador', 'idComunicacao', 'Motivo', 'Risco']],
+                            use_container_width=True, hide_index=True,
+                            column_config={"Motivo": st.column_config.TextColumn("Descrição do Alerta", width="large")}
                         )
                     else:
-                        st.info("Este envolvido possui score baseado apenas em indicadores quantitativos (PEP, Valor ou Frequência), sem alertas qualitativos específicos.")
-
-
+                        st.info("Este alvo possui score baseado apenas em indicadores matemáticos (HHI, PEP ou Volume).")
 
 
     # --- Conteúdo da Aba 7: Ranking de Comunicações ---
