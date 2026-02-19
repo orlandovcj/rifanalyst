@@ -909,7 +909,6 @@ def analyze_suspicious_patterns(_df_display, _df_ocorrencias, _df_comunicacoes, 
             })
 
     # Padrão 15: Concentração de Perfis de Risco
-    # ... (código mantido, adiciona str()) ...
     for flag in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
          if flag not in df_envolvidos_local.columns: df_envolvidos_local[flag] = 'Não'
          df_envolvidos_local[flag] = df_envolvidos_local[flag].apply(lambda x: True if str(x).strip().lower() == 'sim' else False).fillna(False).astype(bool)
@@ -985,51 +984,29 @@ def analyze_suspicious_patterns(_df_display, _df_ocorrencias, _df_comunicacoes, 
                      'Risco': 'Alto'
                  })
 
-    # --- Consolidação Final ---
+    # --- Consolidação Final (Versão Corrigida) ---
     if not suspicious_patterns:
-        return pd.DataFrame(columns=return_cols)
+        return pd.DataFrame(columns=return_cols + ['Pontos'])
 
     final_df = pd.DataFrame(suspicious_patterns)
-    # Garantir todas as colunas de retorno e tipo string para IDs
-    for col in return_cols:
-         if col not in final_df.columns:
-             final_df[col] = 'N/A'
-         # Forçar string para colunas de ID
-         if col in ['Indexador', 'idComunicacao', 'cpfCnpj']:
-              final_df[col] = final_df[col].astype(str)
-
-    # Mapear nomes
-    final_df['Nome'] = final_df.apply(
-         lambda row: envolvidos_dict.get(row['cpfCnpj'], row['Nome']) if not row['cpfCnpj'].startswith('N/A') else row['Nome'],
-         axis=1
-    )
-    # Remover padrões onde a identificação principal é Desconhecido/N/A
-    final_df = final_df[~final_df['cpfCnpj'].astype(str).str.contains(r'DESCONHECIDO|N/A \(Indexador\)|N/A \(Narrativa\)', na=False, regex=True)]
-    # Garantir ordem das colunas e remover duplicatas
-    # Usar todas as colunas exceto Nome (que pode variar ligeiramente) para drop_duplicates pode ser mais seguro
-    key_cols = ['Indexador', 'idComunicacao', 'cpfCnpj', 'Motivo', 'Risco']
-    final_df = final_df[return_cols].drop_duplicates(subset=key_cols)
+    
+    # Garantir tipo string para IDs e CPF
+    for col in ['Indexador', 'idComunicacao', 'cpfCnpj']:
+        if col in final_df.columns:
+            final_df[col] = final_df[col].astype(str)
 
     if not final_df.empty:
-        # Definir pesos
+        # 1. Definir pesos por gravidade
         pesos = {'Crítico': 10, 'Alto': 5, 'Moderado': 2, 'Baixo': 1}
 
-        # Criar coluna de pontos
+        # 2. Atribuir os pontos a cada linha de alerta
         final_df['Pontos'] = final_df['Risco'].map(pesos).fillna(1)
+        
+        # 3. Limpar nomes e remover registros irrelevantes
+        final_df = final_df[~final_df['cpfCnpj'].astype(str).str.contains(r'DESCONHECIDO|N/A', na=False)]
 
-        # Agrupar por Envolvido para somar pontos
-        score_df = final_df.groupby(['cpfCnpj', 'Nome'])['Pontos'].sum().reset_index()
-        score_df = score_df.sort_values('Pontos', ascending=False)
-
-        # Adicionar classificação baseada no score total
-        def classificar_risco(pontos):
-            if pontos >= 20: return 'Altíssimo Risco'
-            if pontos >= 10: return 'Alto Risco'
-            return 'Médio Risco'
-
-        score_df['Classificação Final'] = score_df['Pontos'].apply(classificar_risco)
-
-    return final_df
+    return final_df # Retorna a lista detalhada com a coluna Pontos
+    
 
 # --- NOVO: Função para criar grafo de UMA comunicação ---
 def create_communication_graph(df_envolvidos_comunicacao):
@@ -2438,9 +2415,10 @@ if st.session_state.data_loaded:
         options_envolvidos = ["Selecione..."]
 
     # --- Criação das Abas ---
-    tab_geral, tab_patterns, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
+    #tab_geral, tab_patterns, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
+    tab_geral, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
         "📊 Análise Geral",
-        "⚠️ Padrões Suspeitos",
+        #"⚠️ Padrões Suspeitos",
         "🏆 Ranking de Envolvidos",
         "👤 Análise Individual Detalhada",
         "💬 Ranking de Comunicações",
@@ -2837,92 +2815,96 @@ if st.session_state.data_loaded:
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Nenhum dado corresponde aos filtros selecionados para a Análise Geral.")
-
-    # --- Conteúdo da Aba 2: Padrões Suspeitos ---
-    with tab_patterns:
-        st.header("⚠️ Padrões Suspeitos (Baseado nos Dados Filtrados)")
-
-        if not df_display.empty:
-            with st.spinner("Analisando padrões suspeitos e calculando scores..."):
-                suspicious_df_filtered = analyze_suspicious_patterns(
-                    df_display,
-                    st.session_state.df_ocorrencias,
-                    st.session_state.df_comunicacoes,
-                    st.session_state.df_envolvidos
-                )
-
-            if suspicious_df_filtered is not None and not suspicious_df_filtered.empty:
-                # --- NOVO: Placar de Risco (Scoring) ---
-                st.subheader("🔥 Ranking de Risco dos Envolvidos")
-
-                # Definir pesos para os riscos
-                risk_weights = {'Crítico': 10, 'Alto': 5, 'Moderado': 2, 'Baixo': 1}
-
-                # Calcular score
-                score_df = suspicious_df_filtered.copy()
-                score_df['Pontos'] = score_df['Risco'].map(risk_weights).fillna(1)
-
-                # Agrupar por CPF/CNPJ e Nome
-                ranking = score_df.groupby(['cpfCnpj', 'Nome']).agg(
-                    Score_Total=('Pontos', 'sum'),
-                    Qtd_Alertas=('Motivo', 'count'),
-                    Tipos_Risco=('Risco', lambda x: list(x.unique()))
-                ).reset_index()
-
-                # Filtrar 'N/A' e ordenar
-                ranking = ranking[~ranking['cpfCnpj'].str.contains('N/A', na=False)]
-                ranking = ranking.sort_values('Score_Total', ascending=False).head(20) # Top 20
-
-                # Exibir Tabela de Ranking
-                st.dataframe(
-                    ranking,
-                    width='stretch',
-                    hide_index=True,
-                    column_config={
-                        "cpfCnpj": "CPF/CNPJ",
-                        "Score_Total": st.column_config.ProgressColumn("Score de Risco", format="%d", min_value=0, max_value=int(ranking['Score_Total'].max() * 1.2)),
-                        "Qtd_Alertas": "Qtd. Alertas",
-                        "Tipos_Risco": "Níveis Detectados"
-                    }
-                )
-                st.divider()
-                # --- FIM NOVO ---
-
-                st.subheader("Detalhe dos Padrões Identificados")
-
-                # Correção para Arrow (string conversion)
-                suspicious_df_display = suspicious_df_filtered.copy()
-                if 'Indexador' in suspicious_df_display.columns:
-                    suspicious_df_display['Indexador'] = suspicious_df_display['Indexador'].astype(str)
-                if 'idComunicacao' in suspicious_df_display.columns:
-                    suspicious_df_display['idComunicacao'] = suspicious_df_display['idComunicacao'].astype(str)
-
-                st.dataframe(
-                    suspicious_df_display,
-                    width='stretch',
-                    column_config={
-                        "Indexador": st.column_config.TextColumn("Indexador", width="medium"),
-                        "idComunicacao": st.column_config.TextColumn("ID Com.", width="medium"),
-                        "cpfCnpj": st.column_config.TextColumn("CPF/CNPJ", width="medium"),
-                        "Nome": st.column_config.TextColumn("Nome", width="large"),
-                        "Motivo": st.column_config.TextColumn("Motivo", width="large"),
-                        "Risco": st.column_config.TextColumn("Risco", width="small")
-                    },hide_index=True
-                )
-
-                # Gráfico de distribuição de riscos
-                risk_counts = suspicious_df_filtered['Risco'].value_counts().reset_index()
-                risk_counts.columns = ['Risco', 'Contagem']
-                fig = px.bar(risk_counts, x='Risco', y='Contagem', title="Distribuição dos Níveis de Risco",
-                             color='Risco', color_discrete_map={'Alto': '#FF6B6B', 'Crítico': '#D00000', 'Moderado': '#FFB703'},
-                             category_orders={"Risco": ["Moderado", "Alto", "Crítico"]}
-                            )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Nenhum padrão suspeito detectado nos dados que correspondem aos filtros selecionados.")
-        else:
-            st.info("Nenhum dado para analisar padrões (verifique filtros).")
-
+    
+#''' NOTA: A ABA DE PADRÕES SUSPEITOS FOI INTEGRADA AO RANKING DE ENVOLVIDOS PARA SIMPLIFICAR
+##        MANTEMOS O CÓDIGO AQUI APENAS PARA REFERÊNCIAS FUTURAS
+#        
+#    # --- Conteúdo da Aba 2: Padrões Suspeitos ---
+#    with tab_patterns:
+#        st.header("⚠️ Padrões Suspeitos (Baseado nos Dados Filtrados)")
+#
+#        if not df_display.empty:
+#            with st.spinner("Analisando padrões suspeitos e calculando scores..."):
+#                suspicious_df_filtered = analyze_suspicious_patterns(
+#                    df_display,
+#                    st.session_state.df_ocorrencias,
+#                    st.session_state.df_comunicacoes,
+#                    st.session_state.df_envolvidos
+#                )
+#
+#            if suspicious_df_filtered is not None and not suspicious_df_filtered.empty:
+#                # --- NOVO: Placar de Risco (Scoring) ---
+#                st.subheader("🔥 Ranking de Risco dos Envolvidos")
+#
+#                # Definir pesos para os riscos
+#                risk_weights = {'Crítico': 10, 'Alto': 5, 'Moderado': 2, 'Baixo': 1}
+#
+#                # Calcular score
+#                score_df = suspicious_df_filtered.copy()
+#                score_df['Pontos'] = score_df['Risco'].map(risk_weights).fillna(1)
+#
+#                # Agrupar por CPF/CNPJ e Nome
+#                ranking = score_df.groupby(['cpfCnpj', 'Nome']).agg(
+#                    Score_Total=('Pontos', 'sum'),
+#                    Qtd_Alertas=('Motivo', 'count'),
+#                    Tipos_Risco=('Risco', lambda x: list(x.unique()))
+#                ).reset_index()
+#
+#                # Filtrar 'N/A' e ordenar
+#                ranking = ranking[~ranking['cpfCnpj'].str.contains('N/A', na=False)]
+#                ranking = ranking.sort_values('Score_Total', ascending=False).head(20) # Top 20
+#
+#                # Exibir Tabela de Ranking
+#                st.dataframe(
+#                    ranking,
+#                    width='stretch',
+#                    hide_index=True,
+#                    column_config={
+#                        "cpfCnpj": "CPF/CNPJ",
+#                        "Score_Total": st.column_config.ProgressColumn("Score de Risco", format="%d", min_value=0, max_value=int(ranking['Score_Total'].max() * 1.2)),
+#                        "Qtd_Alertas": "Qtd. Alertas",
+#                        "Tipos_Risco": "Níveis Detectados"
+#                    }
+#                )
+#                st.divider()
+#                # --- FIM NOVO ---
+#
+#                st.subheader("Detalhe dos Padrões Identificados")
+#
+#                # Correção para Arrow (string conversion)
+#                suspicious_df_display = suspicious_df_filtered.copy()
+#                if 'Indexador' in suspicious_df_display.columns:
+#                    suspicious_df_display['Indexador'] = suspicious_df_display['Indexador'].astype(str)
+#                if 'idComunicacao' in suspicious_df_display.columns:
+#                    suspicious_df_display['idComunicacao'] = suspicious_df_display['idComunicacao'].astype(str)
+#
+#                st.dataframe(
+#                    suspicious_df_display,
+#                    width='stretch',
+#                    column_config={
+#                        "Indexador": st.column_config.TextColumn("Indexador", width="medium"),
+#                        "idComunicacao": st.column_config.TextColumn("ID Com.", width="medium"),
+#                        "cpfCnpj": st.column_config.TextColumn("CPF/CNPJ", width="medium"),
+#                        "Nome": st.column_config.TextColumn("Nome", width="large"),
+#                        "Motivo": st.column_config.TextColumn("Motivo", width="large"),
+#                        "Risco": st.column_config.TextColumn("Risco", width="small")
+#                    },hide_index=True
+#                )
+#
+#                # Gráfico de distribuição de riscos
+#                risk_counts = suspicious_df_filtered['Risco'].value_counts().reset_index()
+#                risk_counts.columns = ['Risco', 'Contagem']
+#                fig = px.bar(risk_counts, x='Risco', y='Contagem', title="Distribuição dos Níveis de Risco",
+#                             color='Risco', color_discrete_map={'Alto': '#FF6B6B', 'Crítico': '#D00000', 'Moderado': '#FFB703'},
+#                             category_orders={"Risco": ["Moderado", "Alto", "Crítico"]}
+#                            )
+#                st.plotly_chart(fig, use_container_width=True)
+#            else:
+#                st.info("Nenhum padrão suspeito detectado nos dados que correspondem aos filtros selecionados.")
+#        else:
+#            st.info("Nenhum dado para analisar padrões (verifique filtros).")
+#'''
+    
     # --- Conteúdo da Aba 3: Análise de Rede Individual ---
     with tab_network:
         st.header("🌐 Análise de Rede Individual")
@@ -3501,251 +3483,134 @@ if st.session_state.data_loaded:
             else:
                  st.info("Selecione um Indexador na lista acima para ver os detalhes.")
 
-    # --- Conteúdo da Aba 6: Ranking de Envolvidos ---
+    # --- Conteúdo da Aba 6: Ranking de Envolvidos (INTERATIVO) ---
     with tabranking:
-        st.header("Ranking de Envolvidos")
-        st.caption(
-            "Ranking calculado a partir dos indicadores quantitativos (fracionamento, concentração de contrapartes, espécie, "
-            "exposição a PEP/servidores/pessoas obrigadas)."
-        )
+        st.header("🏆 Ranking de Risco Consolidado")
+        st.caption("O Score Total soma pontos de indicadores matemáticos e padrões suspeitos detectados.")
+        # --- SEÇÃO DE AJUDA SOLICITADA ---
+        with st.expander("❓ Como é calculado o score de risco"):
+            st.markdown("""
+            O **Score Total** é uma pontuação integrada que combina a análise comportamental (padrões qualitativos) com métricas estatísticas (indicadores quantitativos).
+            
+            ### 1. Padrões Comportamentais (Qualitativos)
+            Estes alertas são extraídos diretamente das narrativas e ocorrências reportadas, classificados por gravidade:
+            * **Crítico (10 pts):** Fracionamento de valores, PEP com múltiplas comunicações, Alto valor em espécie ou Keywords de alto risco (ex: 'Laranja', 'Doleiro').
+            * **Alto (5 pts):** Burla de limites (Structuring), Transações de altíssimo valor (> R$ 1Mi), Saques/Depósitos vultosos em espécie ou Alta Frequência.
+            * **Moderado (2 pts):** Contas recém-abertas (< 30 dias), Movimentação em múltiplas cidades no mesmo dia ou Resistência a informações.
+            
+            ### 2. Indicadores Matemáticos (Quantitativos)
+            Métricas calculadas sobre o histórico consolidado do envolvido:
+            * **HHI (Concentração):** O Índice de Herfindahl-Hirschman mede se o dinheiro está concentrado em poucas contrapartes (Risco de contas-âncora).
+            * **Fracionamento Temporal:** Identifica dias com 3 ou mais operações, sugerindo tentativa de divisão de valores para evitar reporte.
+            * **Proximidade de Limites:** Monitora operações que ficam propositalmente entre 90% e 99% do limite de R$ 50 mil.
+            
+            ### 3. Regra de Cálculo do Score
+            A pontuação final é a soma de:
+            1.  **Pontos Qualitativos:** Soma de todos os alertas detectados pela análise de padrões.
+            2.  **Bônus de Perfil:** +5 pontos se for PEP, +5 se Servidor Público e +5 se Pessoa Obrigada.
+            3.  **Bônus de Concentração:** +10 pontos se o índice HHI for superior a 0.6.
+            4.  **Bônus de Fracionamento:** +2 pontos para cada dia identificado com alta frequência de operações simultâneas.
+            """)
+        # --- FIM DA SEÇÃO DE AJUDA ---
 
-        if "df_final" not in st.session_state or st.session_state.df_final is None or st.session_state.df_final.empty:
-            st.info("Nenhum dado disponível para calcular o ranking. Verifique o upload e os filtros.")
+        if "df_final" not in st.session_state or st.session_state.df_final is None:
+            st.info("Aguardando carregamento de dados...")
         else:
-            # Recalcula (ou busca do cache) os indicadores por envolvido usando o df_final (já filtrado)
-            with st.spinner("Calculando indicadores por envolvido..."):
-                df_env = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
-
-            if df_env is None or df_env.empty:
-                st.info("Não foi possível calcular indicadores para os dados atuais.")
-            else:
-                # Seleção de critério de ordenação
-                st.subheader("Parâmetros do Ranking")
-
-                criterio_map = {
-                    "Valor total (R$)": "valor_total",
-                    "Concentração de contrapartes (HHI)": "hhi_contrapartes",
-                    "Dias com ≥3 operações no mesmo dia": "fracionamento_dias_com_3+_ops",
-                    "% operações próximas ao limite de R$ 50k": "pct_ops_proximas_limite_50k",
-                }
-
-                criterio_escolhido = st.selectbox(
-                    "Ordenar por:",
-                    options=list(criterio_map.keys()),
-                    index=0,
-                    key="ranking_env_criterio",
+            with st.spinner("Calculando Score de Risco Integrado..."):
+                # A. Obter indicadores quantitativos básicos
+                df_env_base = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
+                
+                # B. Obter todos os alertas detalhados
+                df_alertas_brutos = analyze_suspicious_patterns(
+                    df_display, # Usa os dados filtrados na barra lateral
+                    st.session_state.df_ocorrencias,
+                    st.session_state.df_comunicacoes,
+                    st.session_state.df_envolvidos
                 )
 
-                # Ordem decrescente para todos os critérios (maior = mais crítico)
-                col_ordenacao = criterio_map[criterio_escolhido]
-                df_rank = df_env.copy()
-
-                if col_ordenacao not in df_rank.columns:
-                    st.warning(
-                        f"O critério selecionado ('{col_ordenacao}') não está disponível nos indicadores calculados."
-                    )
+                # C. Consolidar pontos por CPF
+                if not df_alertas_brutos.empty:
+                    df_resumo_alertas = df_alertas_brutos.groupby('cpfCnpj').agg(
+                        Score_Qualitativo=('Pontos', 'sum'),
+                        Qtd_Alertas=('Motivo', 'count')
+                    ).reset_index()
                 else:
-                    df_rank = df_rank.sort_values(col_ordenacao, ascending=False).reset_index(drop=True)
+                    df_resumo_alertas = pd.DataFrame(columns=['cpfCnpj', 'Score_Qualitativo', 'Qtd_Alertas'])
 
-                    # Seleção de quantidade a exibir
-                    top_n = st.slider(
-                        "Quantidade de envolvidos a exibir",
-                        min_value=10,
-                        max_value=200,
-                        value=50,
-                        step=10,
-                        key="ranking_env_topn",
-                    )
+                # D. Cruzar Indicadores com Alertas
+                df_ranking = pd.merge(
+                    df_env_base, 
+                    df_resumo_alertas, 
+                    left_on='cpfCnpjEnvolvido', 
+                    right_on='cpfCnpj', 
+                    how='left'
+                ).fillna(0)
 
-                    df_rank_top = df_rank.head(top_n).copy()
-                    df_rank_top.insert(0, "Posição", range(1, len(df_rank_top) + 1))
+                # E. Regra de Score Total (Personalizável)
+                # Soma pontos qualitativos + pontos por PEP/Servidor/Concentração
+                df_ranking['ScoreTotal'] = df_ranking['Score_Qualitativo'] + \
+                                          (df_ranking['flag_pep'].astype(int) * 5) + \
+                                          (df_ranking['flag_servidor'].astype(int) * 5)
 
-                    # Métricas-resumo rápidas
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Total de Envolvidos no Ranking", int(df_rank.shape[0]))
-                    col2.metric(
-                        "Maior valor total (R$)",
-                        f"R$ {df_rank['valor_total'].max():,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                        if "valor_total" in df_rank.columns and not df_rank["valor_total"].isna().all()
-                        else "N/D",
-                    )
-                    col3.metric(
-                        "Máx. dias com ≥3 ops/dia",
-                        int(df_rank["fracionamento_dias_com_3+_ops"].max())
-                        if "fracionamento_dias_com_3+_ops" in df_rank.columns
-                        else 0,
-                    )
-                    col4.metric(
-                        "Máx. % ops próximas a 50k",
-                        f"{df_rank['pct_ops_proximas_limite_50k'].max():.1f}%"
-                        if "pct_ops_proximas_limite_50k" in df_rank.columns
-                        else "0,0%",
-                    )
+                # Ordenar e preparar para exibição
+                df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
+                df_ranking.insert(0, "Pos.", range(1, len(df_ranking) + 1))
 
-                    st.subheader("Tabela de Ranking de Envolvidos")
+                # F. Tabela Interativa (Habilita Seleção)
+                st.subheader("Classificação Geral")
+                st.caption("Selecione uma linha para detalhar os padrões identificados.")
+                config_visual = {
+                    "Pos.": st.column_config.NumberColumn("Pos.", width="small"),
+                    "ScoreTotal": st.column_config.ProgressColumn("Score de Risco", format="%d pts", min_value=0, max_value=int(df_ranking['ScoreTotal'].max() if not df_ranking.empty else 100)),
+                    "valor_total": st.column_config.NumberColumn("Valor Total", format="R$ %.2f")
+                }
+                
+                # Exibir dataframe com modo de seleção
+                ranking_selection = st.dataframe(
+                    df_ranking[["Pos.", "cpfCnpjEnvolvido", "nomeEnvolvido", "ScoreTotal", "n_comunicacoes", "valor_total"]].head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=config_visual,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="ranking_env_table"
+                )
 
-                    # Selecionar colunas principais para exibição
-                    cols_basicas = [
-                        "Posição",
-                        "cpfCnpjEnvolvido",
-                        "nomeEnvolvido",
-                        "n_comunicacoes",
-                        "valor_total",
-                        "fracionamento_dias_com_3+_ops",
-                        "pct_ops_proximas_limite_50k",
-                        "hhi_contrapartes",
-                        "pct_top1_contraparte",
-                        "pct_top3_contrapartes",
-                        "pct_top5_contrapartes",
-                        "pct_valor_especie_A",
-                        "pct_valor_especie_B",
-                        "flag_pep",
-                        "flag_servidor",
-                        "flag_pessoa_obrigada",
-                    ]
+                # G. Gráfico de Dispersão
+                fig_risk = px.scatter(df_ranking.head(30), x='valor_total', y='ScoreTotal', size='ScoreTotal', color='ScoreTotal',
+                                    hover_name='nomeEnvolvido', title="Relação: Volume Financeiro vs. Score de Risco")
+                st.plotly_chart(fig_risk, use_container_width=True)
 
-                    cols_exist = [c for c in cols_basicas if c in df_rank_top.columns]
-                    df_show = df_rank_top[cols_exist].copy()
+                # H. Lógica de Exibição de Detalhes ao Selecionar Linha
+                selection = ranking_selection.get("selection", {})
+                if selection and selection.get("rows"):
+                    row_idx = selection["rows"][0]
+                    # Pegar dados do envolvido selecionado
+                    alvo_selecionado = df_ranking.iloc[row_idx]
+                    sel_cpf = alvo_selecionado["cpfCnpjEnvolvido"]
+                    sel_nome = alvo_selecionado["nomeEnvolvido"]
 
-                    # Formatação de colunas numéricas
-                    # Cria versões formatadas para exibição sem alterar os dados base
-                    if "valor_total" in df_show.columns:
-                        df_show["valor_total_fmt"] = df_show["valor_total"].apply(
-                            lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    st.markdown("---")
+                    st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
+                    
+                    # Filtrar a lista bruta de alertas apenas para este CPF/CNPJ
+                    detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
+                    
+                    if not detalhes_alvo.empty:
+                        st.dataframe(
+                            detalhes_alvo[['Indexador', 'idComunicacao', 'cpfCnpj', 'Nome', 'Motivo', 'Risco']],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Motivo": st.column_config.TextColumn("Motivo", width="large"),
+                                "Risco": st.column_config.TextColumn("Risco", width="small")
+                            }
                         )
-                    if "pct_ops_proximas_limite_50k" in df_show.columns:
-                        df_show["pct_ops_proximas_limite_50k_fmt"] = df_show[
-                            "pct_ops_proximas_limite_50k"
-                        ].apply(lambda x: f"{x:.1f}%")
-                    if "pct_top1_contraparte" in df_show.columns:
-                        df_show["pct_top1_contraparte_fmt"] = df_show["pct_top1_contraparte"].apply(
-                            lambda x: f"{x:.1f}%"
-                        )
-                    if "pct_top3_contrapartes" in df_show.columns:
-                        df_show["pct_top3_contrapartes_fmt"] = df_show["pct_top3_contrapartes"].apply(
-                            lambda x: f"{x:.1f}%"
-                        )
-                    if "pct_top5_contrapartes" in df_show.columns:
-                        df_show["pct_top5_contrapartes_fmt"] = df_show["pct_top5_contrapartes"].apply(
-                            lambda x: f"{x:.1f}%"
-                        )
-                    if "pct_valor_especie_A" in df_show.columns:
-                        df_show["pct_valor_especie_A_fmt"] = df_show["pct_valor_especie_A"].apply(
-                            lambda x: f"{x:.1f}%"
-                        )
-                    if "pct_valor_especie_B" in df_show.columns:
-                        df_show["pct_valor_especie_B_fmt"] = df_show["pct_valor_especie_B"].apply(
-                            lambda x: f"{x:.1f}%"
-                        )
+                    else:
+                        st.info("Este envolvido possui score baseado apenas em indicadores quantitativos (PEP, Valor ou Frequência), sem alertas qualitativos específicos.")
 
-                    # Define ordem final de colunas para visualização
-                    cols_view = ["Posição", "cpfCnpjEnvolvido", "nomeEnvolvido"]
 
-                    if "n_comunicacoes" in df_show.columns:
-                        cols_view.append("n_comunicacoes")
-                    if "valor_total_fmt" in df_show.columns:
-                        cols_view.append("valor_total_fmt")
-                    elif "valor_total" in df_show.columns:
-                        cols_view.append("valor_total")
 
-                    if "fracionamento_dias_com_3+_ops" in df_show.columns:
-                        cols_view.append("fracionamento_dias_com_3+_ops")
-                    if "pct_ops_proximas_limite_50k_fmt" in df_show.columns:
-                        cols_view.append("pct_ops_proximas_limite_50k_fmt")
-
-                    if "hhi_contrapartes" in df_show.columns:
-                        cols_view.append("hhi_contrapartes")
-                    if "pct_top1_contraparte_fmt" in df_show.columns:
-                        cols_view.append("pct_top1_contraparte_fmt")
-                    if "pct_top3_contrapartes_fmt" in df_show.columns:
-                        cols_view.append("pct_top3_contrapartes_fmt")
-                    if "pct_top5_contrapartes_fmt" in df_show.columns:
-                        cols_view.append("pct_top5_contrapartes_fmt")
-
-                    if "pct_valor_especie_A_fmt" in df_show.columns:
-                        cols_view.append("pct_valor_especie_A_fmt")
-                    if "pct_valor_especie_B_fmt" in df_show.columns:
-                        cols_view.append("pct_valor_especie_B_fmt")
-
-                    for flag_col in ["flag_pep", "flag_servidor", "flag_pessoa_obrigada"]:
-                        if flag_col in df_show.columns:
-                            cols_view.append(flag_col)
-
-                    df_show = df_show[cols_view]
-
-                    # Configuração de colunas para st.dataframe
-                    column_config = {
-                        "Posição": st.column_config.NumberColumn("Posição", format="%d"),
-                        "cpfCnpjEnvolvido": st.column_config.TextColumn("CPF/CNPJ"),
-                        "nomeEnvolvido": st.column_config.TextColumn("Nome"),
-                        "n_comunicacoes": st.column_config.NumberColumn("Qtd. Com.",
-                            help="Quantidade de comunicações distintas envolvendo o CPF/CNPJ"),
-                        "valor_total": st.column_config.NumberColumn(
-                            "Valor Total (CampoA)",
-                            format="R$ %.2f",
-                            help="Soma do valor principal (CampoA) para o envolvido",
-                        ),
-                        "valor_total_fmt": st.column_config.TextColumn(
-                            "Valor Total (CampoA)", help="Soma do valor principal (CampoA) para o envolvido"
-                        ),
-                        "fracionamento_dias_com_3+_ops": st.column_config.NumberColumn(
-                            "Dias com ≥3 ops/dia",
-                            help="Nº de dias em que houve 3 ou mais operações no mesmo dia",
-                        ),
-                        "pct_ops_proximas_limite_50k_fmt": st.column_config.TextColumn(
-                            "% ops próximas a 50k",
-                            help="Percentual de operações com valor entre 90% e 99% de R$ 50.000,00",
-                        ),
-                        "hhi_contrapartes": st.column_config.NumberColumn(
-                            "HHI contrapartes",
-                            format="%.3f",
-                            help="Índice de Herfindahl-Hirschman sobre a distribuição de valor entre contrapartes",
-                        ),
-                        "pct_top1_contraparte_fmt": st.column_config.TextColumn(
-                            "% top1 contraparte",
-                            help="Percentual do valor concentrado na principal contraparte",
-                        ),
-                        "pct_top3_contrapartes_fmt": st.column_config.TextColumn(
-                            "% top3 contrapartes",
-                            help="Percentual do valor concentrado nas 3 principais contrapartes",
-                        ),
-                        "pct_top5_contrapartes_fmt": st.column_config.TextColumn(
-                            "% top5 contrapartes",
-                            help="Percentual do valor concentrado nas 5 principais contrapartes",
-                        ),
-                        "pct_valor_especie_A_fmt": st.column_config.TextColumn(
-                            "% espécie CampoA",
-                            help="Percentual do valor total em segmentos de espécie (CampoA)",
-                        ),
-                        "pct_valor_especie_B_fmt": st.column_config.TextColumn(
-                            "% espécie CampoB",
-                            help="Percentual do valor total em segmentos de espécie (CampoB)",
-                        ),
-                        "flag_pep": st.column_config.CheckboxColumn(
-                            "PEP",
-                            help="Envolvido é PEP em alguma comunicação",
-                        ),
-                        "flag_servidor": st.column_config.CheckboxColumn(
-                            "Servidor",
-                            help="Envolvido é servidor público em alguma comunicação",
-                        ),
-                        "flag_pessoa_obrigada": st.column_config.CheckboxColumn(
-                            "Pessoa Obrigada",
-                            help="Envolvido é pessoa obrigada citada em alguma comunicação",
-                        ),
-                    }
-
-                    st.dataframe(
-                        df_show,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={k: v for k, v in column_config.items() if k in df_show.columns},
-                    )
-
-                    st.caption(
-                        "Dica: selecione um CPF/CNPJ deste ranking e utilize a aba 'Análise Individual Detalhada' "
-                        "ou 'Análise de Rede Individual' para aprofundar a investigação."
-                    )
 
     # --- Conteúdo da Aba 7: Ranking de Comunicações ---
     with tabranking_com:
