@@ -986,26 +986,34 @@ def analyze_suspicious_patterns(_df_display, _df_ocorrencias, _df_comunicacoes, 
 
     # --- Consolidação Final (Versão Corrigida) ---
     if not suspicious_patterns:
-        return pd.DataFrame(columns=return_cols + ['Pontos'])
+        return pd.DataFrame(columns=return_cols)
 
     final_df = pd.DataFrame(suspicious_patterns)
     
-    # Garantir tipo string para IDs e CPF
-    for col in ['Indexador', 'idComunicacao', 'cpfCnpj']:
-        if col in final_df.columns:
-            final_df[col] = final_df[col].astype(str)
+    # 1. REMOVER DUPLICADAS (O "Pulo do Gato")
+    # Isso elimina as repetições causadas pelas múltiplas ocorrências do merge
+    key_cols = ['Indexador', 'idComunicacao', 'cpfCnpj', 'Motivo', 'Risco']
+    final_df = final_df.drop_duplicates(subset=key_cols)
 
     if not final_df.empty:
-        # 1. Definir pesos por gravidade
+        # Definir pesos
         pesos = {'Crítico': 10, 'Alto': 5, 'Moderado': 2, 'Baixo': 1}
 
-        # 2. Atribuir os pontos a cada linha de alerta
+        # Criar coluna de pontos
         final_df['Pontos'] = final_df['Risco'].map(pesos).fillna(1)
-        
-        # 3. Limpar nomes e remover registros irrelevantes
-        final_df = final_df[~final_df['cpfCnpj'].astype(str).str.contains(r'DESCONHECIDO|N/A', na=False)]
 
-    return final_df # Retorna a lista detalhada com a coluna Pontos
+        # Agrupar por Envolvido para somar pontos (opcional para o retorno da lista)
+        score_df = final_df.groupby(['cpfCnpj', 'Nome'])['Pontos'].sum().reset_index()
+        score_df = score_df.sort_values('Pontos', ascending=False)
+
+        def classificar_risco(pontos):
+            if pontos >= 20: return 'Altíssimo Risco'
+            if pontos >= 10: return 'Alto Risco'
+            return 'Médio Risco'
+
+        score_df['Classificação Final'] = score_df['Pontos'].apply(classificar_risco)
+
+    return final_df
     
 
 # --- NOVO: Função para criar grafo de UMA comunicação ---
