@@ -63,7 +63,7 @@ df_segmento_desc['CodigoSegmento'] = df_segmento_desc['CodigoSegmento'].astype(s
 
 MAX_CONEXOES_REDE = 600
 VERSAO = '3.2'
-DATA_VERSAO = '18/02/2026'
+DATA_VERSAO = '19/02/2026'
 
 # Configurações da página
 st.set_page_config(
