@@ -316,6 +316,96 @@ def analyze_individual_network(df_full, selected_cpf):
     # Retornar contagem de arestas
     return G, partition, G.number_of_edges()
 
+def plot_relacionamentos_envolvido(df_full: pd.DataFrame, cpf_base: str):
+    """
+    Gera um gráfico de barras mostrando a força dos vínculos entre o envolvido cpf_base
+    e seus contrapartes, com base em nº de comunicações e soma de ValorTotal (Campo A).
+    df_full deve ser o dffinal (ou dfdisplay) já filtrado.
+    """
+    if df_full is None or df_full.empty:
+        return None
+
+    # Garante colunas essenciais
+    for col in ["cpfCnpjEnvolvido", "Indexador_x", "ValorTotal"]:
+        if col not in df_full.columns:
+            return None
+
+    df_local = df_full.copy()
+    df_local["cpfCnpjEnvolvido"] = df_local["cpfCnpjEnvolvido"].astype(str)
+    df_local["Indexador_x"] = df_local["Indexador_x"].astype(str)
+    df_local["ValorTotal"] = pd.to_numeric(df_local["ValorTotal"], errors="coerce").fillna(0.0)
+
+    # Comunicações onde o envolvido base participa
+    idx_envolvido = df_local[df_local["cpfCnpjEnvolvido"] == str(cpf_base)]["Indexador_x"].unique()
+    if len(idx_envolvido) == 0:
+        return None
+
+    df_sub = df_local[df_local["Indexador_x"].isin(idx_envolvido)].copy()
+
+    # Self-merge para obter pares (base, contraparte) nas mesmas comunicações
+    df_pairs = df_sub.merge(
+        df_sub,
+        on="Indexador_x",
+        suffixes=("_orig", "_contra"),
+    )
+
+    # Mantém apenas pares onde o orig é o envolvido base e a contraparte é outro CPF/CNPJ
+    df_pairs = df_pairs[
+        (df_pairs["cpfCnpjEnvolvido_orig"] == str(cpf_base))
+        & (df_pairs["cpfCnpjEnvolvido_contra"] != str(cpf_base))
+    ].copy()
+
+    if df_pairs.empty:
+        return None
+
+    # Usa ValorTotal da contraparte como medida de fluxo; se preferir, pode usar da base
+    df_pairs["valor_vinculo"] = df_pairs["ValorTotal_contra"]
+
+    # Agrega por contraparte
+    agg = (
+        df_pairs.groupby("cpfCnpjEnvolvido_contra", as_index=False)
+        .agg(
+            n_comunicacoes=("Indexador_x", "nunique"),
+            valor_total=("valor_vinculo", "sum"),
+        )
+    )
+
+    # Junta nome da contraparte (se disponível)
+    if "nomeEnvolvido_contra" in df_pairs.columns:
+        nomes = (
+            df_pairs.groupby("cpfCnpjEnvolvido_contra", as_index=False)["nomeEnvolvido_contra"]
+            .agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.iloc[0])
+            .rename(columns={"nomeEnvolvido_contra": "NomeContraparte"})
+        )
+        agg = agg.merge(nomes, on="cpfCnpjEnvolvido_contra", how="left")
+    else:
+        agg["NomeContraparte"] = agg["cpfCnpjEnvolvido_contra"]
+
+    # Ordena por valor_total
+    agg = agg.sort_values("valor_total", ascending=False).head(30)  # top 30 contrapartes
+
+    # Cria rótulo amigável para eixo Y
+    agg["Label"] = agg["NomeContraparte"] + " (" + agg["cpfCnpjEnvolvido_contra"] + ")"
+
+    fig = px.bar(
+        agg,
+        y="Label",
+        x="valor_total",
+        orientation="h",
+        color="n_comunicacoes",
+        labels={
+            "valor_total": "Valor Total (Campo A)",
+            "n_comunicacoes": "Qtd. Comunicações",
+            "Label": "Contraparte",
+        },
+        title="Força dos vínculos (Valor Total e nº de comunicações)",
+        hover_data=["n_comunicacoes"],
+        height=600,
+    )
+    fig.update_layout(yaxis={"categoryorder": "total ascending"})
+
+    return fig
+
 
 # --- NOVO: Função para simplificar o grafo individual ---
 def simplify_graph(G_original, central_node):
@@ -1670,6 +1760,348 @@ def analise_benford(df):
                  title='Análise da Lei de Benford (Detecção de Anomalias Numéricas)')
     return fig
 
+def render_analise_comunicacao(selected_indexador: str):
+    """
+    Renderiza todo o conteúdo da aba 'Análise por Comunicação'
+    para o Indexador selecionado.
+    Reutiliza st.session_state.dfcomunicacoes, dfenvolvidos, dfocorrencias, df_segmento_desc, etc.
+    """
+    import pandas as pd
+
+    if (
+        "df_comunicacoes" not in st.session_state
+        or st.session_state.df_comunicacoes is None
+        or st.session_state.df_comunicacoes.empty
+    ):
+        st.warning("DataFrame de comunicações não está disponível.")
+        return
+
+    df_comunicacoes = st.session_state.df_comunicacoes
+    df_envolvidos = st.session_state.df_envolvidos
+    df_ocorrencias = st.session_state.df_ocorrencias
+
+    # Filtrar dados para o Indexador selecionado (mesma lógica da aba 5)
+    comunicacao_detalhe = df_comunicacoes[df_comunicacoes["Indexador"].astype(str) == str(selected_indexador)]
+    envolvidos_detalhe = df_envolvidos[
+        df_envolvidos["Indexador"].astype(str).str.strip() == str(selected_indexador).strip()
+    ]
+    ocorrencias_detalhe = df_ocorrencias[df_ocorrencias["Indexador"].astype(str) == str(selected_indexador)]
+
+    if comunicacao_detalhe.empty:
+        st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
+        return
+
+    comunicacao_info = comunicacao_detalhe.iloc[0]
+
+    # A partir daqui, copie exatamente o conteúdo que hoje está dentro de `if selected_indexador != "Selecione"...`
+    # na aba "Análise por Comunicação": métricas gerais, Campos A–E, titulares, infos adicionais, wordcloud,
+    # fluxos, gráficos, grafo da comunicação etc., só substituindo `selectedindexador` pela variável local.
+    # Exemplo simplificado:
+
+    if selected_indexador != "Selecione...":
+        st.subheader(f"Detalhes da Comunicação Indexador: {selected_indexador}")
+
+        # Filtrar dados para o Indexador selecionado
+        comunicacao_detalhe = st.session_state.df_comunicacoes[st.session_state.df_comunicacoes['Indexador'] == selected_indexador]
+        envolvidos_detalhe = st.session_state.df_envolvidos[st.session_state.df_envolvidos['Indexador'].astype(str).str.strip() == str(selected_indexador).strip()]
+        ocorrencias_detalhe = st.session_state.df_ocorrencias[st.session_state.df_ocorrencias['Indexador'] == selected_indexador]
+
+        if not comunicacao_detalhe.empty:
+            comunicacao_info = comunicacao_detalhe.iloc[0] # Pega a primeira (e única) linha
+            # Exibir Informações Gerais da Comunicação
+            col1_comm, col2_comm, col3_comm = st.columns(3)
+            with col1_comm:
+                st.metric("ID Comunicação", comunicacao_info.get('idComunicacao', 'N/A'))
+                st.metric("Data Operação", comunicacao_info.get('Data_da_operacao', pd.NaT).strftime('%d/%m/%Y') if pd.notna(comunicacao_info.get('Data_da_operacao')) else 'N/A')
+            with col2_comm:
+                st.metric("Comunicante", comunicacao_info.get('nomeComunicante', 'N/A'))
+                st.metric("Cidade/UF Agência", f"{comunicacao_info.get('CidadeAgencia', 'N/A')} / {comunicacao_info.get('UFAgencia', 'N/A')}")
+            with col3_comm:
+                st.metric("Segmento", comunicacao_info.get('CodigoSegmento', 'N/A'))
+                # Buscar descrição do segmento
+                desc_campos = df_segmento_desc[df_segmento_desc['CodigoSegmento'] == str(comunicacao_info.get('CodigoSegmento', ''))]
+                if not desc_campos.empty:
+                    #st.caption(f"Descrição Campos: {desc_campos['DescricaoCampos'].iloc[0]}")
+                    st.info(f"Descrição Campos do Segmento: {desc_campos['DescricaoCampos'].iloc[0]}")
+                else:
+                    st.caption("Descrição Campos: Segmento não mapeado")
+
+                st.divider()
+
+                # --- NOVO: Exibir Titular(es) da Comunicação (com DESTAQUE) ---
+                st.subheader("👤 Titular(es) da Comunicação")
+                if not envolvidos_detalhe.empty:
+                    # Filtrar pelos papéis de titular
+                    titulares_df = envolvidos_detalhe[
+                        envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])
+                    ]
+
+                    if not titulares_df.empty:
+                        # Exibir cada titular encontrado
+                        for _, titular_row in titulares_df.iterrows():
+                            nome_titular = titular_row.get('nomeEnvolvido', 'N/A')
+                            cpf_titular = titular_row.get('cpfCnpjEnvolvido', 'N/A')
+
+                            # Formatar tags de PEP e Servidor com estilo
+                            pep_info = ""
+                            servidor_info = ""
+                            if str(titular_row.get('bitPepCitado', 'Não')).lower() == 'sim':
+                                # Estilo para a tag PEP (fundo vermelho, texto branco)
+                                pep_info = ' <span style="background-color: #FF6B6B; color: #FFF; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">PEP</span>'
+                        if str(titular_row.get('intServidorCitado', 'Não')).lower() == 'sim':
+                            # Estilo para a tag Servidor (fundo amarelo, texto escuro)
+                            servidor_info = ' <span style="background-color: #FFD700; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">SERVIDOR</span>'
+
+                            # --- MODIFICADO: Bloco HTML para destaque ---
+                            # Usamos um <div> com estilo para criar a caixa.
+                            # Ajuste as cores (background-color, border, color) para o seu tema.
+                            # Estas cores são otimizadas para o tema escuro das suas screenshots.
+                            st.markdown(f"""
+                            <div style="background-color: #222226; border: 1px solid #4C4E54; border-radius: 7px; padding: 12px; margin-bottom: 10px;">
+                                <div style="font-size: 1.25em; font-weight: bold; color: #FAFAFA; margin-bottom: 5px;">
+                                    {nome_titular} {pep_info} {servidor_info}
+                                </div>
+                                <div style="font-size: 1.1em; color: #ADADAD; font-family: monospace;">
+                                    {cpf_titular}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            # --- FIM MODIFICAÇÃO ---
+                        else:
+                            st.info("Nenhum envolvido com papel 'Titular' ou 'Titular da Conta' encontrado para este Indexador.")
+                    else:
+                        st.info("Nenhum envolvido encontrado para este Indexador.")
+                    # --- FIM NOVO ---
+
+                    st.divider()
+
+                    # Exibir Valores (Campos A-E) em destaque
+                    st.subheader("Valores Reportados")
+                    val_cols = st.columns(5)
+                    campos = ['A', 'B', 'C', 'D', 'E']
+                    for i, campo in enumerate(campos):
+                        valor_col_name = f'ValorCampo{campo}'
+                        if valor_col_name in comunicacao_info and pd.notna(comunicacao_info[valor_col_name]):
+                            with val_cols[i]:
+                                st.metric(f"Valor Campo {campo}", f"R$ {comunicacao_info[valor_col_name]:,.2f}")
+                        else:
+                             with val_cols[i]:
+                                st.metric(f"Valor Campo {campo}", "R$ 0,00") # Ou N/A
+
+                    st.divider()
+
+                    # Exibir Informações Adicionais
+                    st.subheader("Informações Adicionais")
+                    st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
+
+                    info_adicional = comunicacao_info.get('informacoesAdicionais', 'Nenhuma informação adicional disponível.')
+                    if pd.isna(info_adicional) or info_adicional.strip() == '':
+                         info_adicional = 'Nenhuma informação adicional disponível.'
+                    # Usar text_area para textos longos, definir altura
+                    st.markdown(f"""
+                    <div style="height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 10px; border-radius: 5px; background-color: #f9f9f9; color: #333;">
+                        {info_adicional.replace('<','&lt;').replace('>','&gt;')}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    # st.code(info_adicional, language=None) # language=None evita highlight # Mostra o conteúdo em uma única linha permitindo cópia.
+                    # st.text_area("Detalhes:", value=info_adicional, height=300, disabled=True, key=f"info_{selected_indexador}") # Mostra o conteúdo bloqueado.
+
+                    # --- NOVO: Nuvem de Palavras e Keywords ---
+                    st.divider()
+                    st.subheader("Nuvem de Palavras e Termos Financeiros Frequentes")
+                    with st.spinner("Gerando nuvem de palavras e analisando termos..."):
+                         wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(info_adicional)
+
+                    if wordcloud_img:
+                        st.image(wordcloud_img, caption="Nuvem das palavras mais frequentes (após remoção de stopwords)")
+                    else:
+                        st.caption("Não foi possível gerar a nuvem de palavras.")
+
+                    if df_fin_keywords is not None and not df_fin_keywords.empty:
+                        st.markdown("##### Top Termos Financeiros:")
+                        st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
+
+                        st.markdown("##### Contexto dos Termos:")
+                        if context_map:
+                            for keyword, snippets in context_map.items():
+                                with st.expander(f"Contexto para '{keyword}' ({len(snippets)} trechos)"):
+                                    for i, snippet in enumerate(snippets):
+                                        #st.markdown(f"_{i+1}_: ...{snippet}...") # Usar markdown para itálico
+                                        st.text_area(
+                                        label=f"Trecho {i+1}", # Rótulo para a caixa de texto
+                                        value=snippet,
+                                        height=100, # Ajuste a altura conforme necessário
+                                        key=f"context_{selected_indexador}_{keyword}_{i}" # Chave única
+                                        )
+                                        if i < len(snippets) - 1: st.markdown("---") # Divisor
+                        else:
+                            st.caption("Não foi possível encontrar contexto para os termos financeiros.")
+                    elif wordcloud_img: # Se a nuvem foi gerada mas keywords não
+                         st.caption("Nenhum termo financeiro relevante encontrado entre as palavras mais frequentes.")
+                    # --- FIM NOVO ---
+
+                    st.divider()
+
+                    # Exibir Ocorrências Vinculadas
+                    st.subheader("Ocorrências Vinculadas")
+                    if not ocorrencias_detalhe.empty:
+                        st.dataframe(ocorrencias_detalhe[['idOcorrencia', 'Ocorrencia']], width='stretch', hide_index=True)
+                    else:
+                        st.info("Nenhuma ocorrência vinculada encontrada para este Indexador.")
+
+                    st.divider()
+
+                    # Exibir Envolvidos Vinculados
+                    st.subheader("Envolvidos Vinculados")
+                    if not envolvidos_detalhe.empty:
+                        # Selecionar e formatar colunas para exibição
+                        cols_envolvidos = ['cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido',
+                                           'bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado',
+                                           'agenciaEnvolvido', 'contaEnvolvido']
+                        cols_envolvidos_exist = [c for c in cols_envolvidos if c in envolvidos_detalhe.columns]
+
+                        # Criar cópia para formatação
+                        envolvidos_display = envolvidos_detalhe[cols_envolvidos_exist].copy()
+
+                        # Formatar booleanos
+                        for flag in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
+                             if flag in envolvidos_display.columns:
+                                 envolvidos_display[flag] = envolvidos_display[flag].apply(lambda x: "Sim" if str(x).lower()=='sim' or x==True else "Não")
+
+                        st.dataframe(envolvidos_display, width='stretch', hide_index=True,
+                                     column_config={
+                                         "cpfCnpjEnvolvido": "CPF/CNPJ",
+                                         "nomeEnvolvido": "Nome",
+                                         "tipoEnvolvido": "Papel",
+                                         "bitPepCitado": "PEP",
+                                         "bitPessoaObrigadaCitado": "P. Obrigada",
+                                         "intServidorCitado": "Servidor P.",
+                                         "agenciaEnvolvido": "Agência Env.",
+                                         "contaEnvolvido": "Conta Env."
+                                     })
+                    else:
+                        st.info("Nenhum envolvido vinculado encontrado para este Indexador.")
+
+
+                    # --- NOVO: Visualização do Grafo da Comunicação ---
+                    st.divider()
+                    st.subheader("Visualização dos Vínculos na Comunicação")
+                    if not envolvidos_detalhe.empty:
+                        with st.spinner("Gerando grafo da comunicação..."):
+                            G_comm, titulares_comm = create_communication_graph(envolvidos_detalhe)
+
+                        if G_comm.number_of_nodes() > 0:
+
+                            # Visualizar o grafo
+                            with st.spinner("Renderizando visualização do grafo..."):
+                                comm_graph_file = visualize_communication_graph(G_comm, titulares_comm)
+
+                            if comm_graph_file:
+                                st.components.v1.html(open(comm_graph_file, 'r', encoding='utf-8').read(), height=550)
+                                st.html(generate_network_legend())
+                            else:
+                                st.warning("Não foi possível renderizar o grafo da comunicação.")
+                        else:
+                            st.info("Não há envolvidos suficientes ou válidos para gerar um grafo para esta comunicação.")
+                    else:
+                        st.info("Não há envolvidos vinculados para gerar o grafo.")
+
+
+                    # --- MODIFICADO: Tabelas e Gráficos de Fluxo Baseados em Informações Adicionais ---
+                    st.divider()
+                    st.subheader("Resumo do Fluxo (Extraído de Informações Adicionais)")
+                    st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
+
+                    if pd.notna(info_adicional) and info_adicional != 'Nenhuma informação adicional disponível.':
+                        with st.spinner("Analisando texto de informações adicionais..."):
+                            # Chamar a nova função que retorna 3 DataFrames
+                            df_creditos_ext, df_debitos_ext, df_cartao_ext = extract_all_financial_data(info_adicional)
+
+                            # --- NOVO: Diagrama de Sankey ---
+                            st.markdown("##### 🌊 Diagrama de Fluxo (Sankey)")
+
+                            # Determinar o nome do titular para o centro do gráfico
+                            nome_titular_sankey = "Titular/Conta"
+                            # Tentar pegar o nome do titular identificado anteriormente na aba
+                            if not envolvidos_detalhe.empty:
+                                 tits = envolvidos_detalhe[envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])]
+                                 if not tits.empty:
+                                     nome_titular_sankey = tits.iloc[0]['nomeEnvolvido']
+
+                            if not df_creditos_ext.empty or not df_debitos_ext.empty:
+                                fig_sankey = plot_sankey_fluxo(df_creditos_ext, df_debitos_ext, nome_titular_sankey)
+                                if fig_sankey:
+                                    st.plotly_chart(fig_sankey, use_container_width=True)
+                                else:
+                                    st.caption("Dados insuficientes para gerar o diagrama de fluxo.")
+                            # --- FIM NOVO ---
+                        # --- FIM MODIFICAÇÃO ---
+
+                        st.markdown("##### Principais Origens de Crédito")
+                        if not df_creditos_ext.empty:
+                            # Ordenar por valor para exibição
+                            df_creditos_ext = df_creditos_ext.sort_values('Valor (R$)', ascending=False)
+                            st.dataframe(df_creditos_ext, width='stretch', hide_index=True,
+                                         column_config={
+                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                                            # Remover 'Detalhe' se não estiver mais presente
+                                         })
+                            fig_cred = px.bar(df_creditos_ext.head(10), y='Origem do Crédito', x='Valor (R$)',
+                                              orientation='h', title='Top 10 Origens de Crédito',
+                                              labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
+                                              text='Valor (R$)', height=400)
+                            fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                            fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
+                            st.plotly_chart(fig_cred, use_container_width=True)
+                        # else: st.caption("Não foi possível extrair origens de crédito.") # Já tratado na função
+
+                        st.markdown("##### Principais Destinos de Débito")
+                        if not df_debitos_ext.empty:
+                            # Ordenar por valor para exibição
+                            df_debitos_ext = df_debitos_ext.sort_values('Valor (R$)', ascending=False)
+                            st.dataframe(df_debitos_ext, width='stretch', hide_index=True,
+                                         column_config={
+                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                                            # Remover 'Detalhe' se não estiver mais presente
+                                         })
+                            fig_deb = px.bar(df_debitos_ext.head(10), y='Destino do Débito', x='Valor (R$)',
+                                             orientation='h', title='Top 10 Destinos de Débito',
+                                             labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
+                                             text='Valor (R$)', height=400)
+                            fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                            fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
+                            st.plotly_chart(fig_deb, use_container_width=True)
+                        # else: st.caption("Não foi possível extrair destinos de débito.") # Já tratado na função
+
+                        st.markdown("##### Principais Gastos no Cartão")
+                        if not df_cartao_ext.empty:
+                             # Ordenar por valor para exibição
+                             df_cartao_ext = df_cartao_ext.sort_values('Valor (R$)', ascending=False)
+                             st.dataframe(df_cartao_ext, width='stretch', hide_index=True,
+                                         column_config={
+                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                                         })
+                             fig_card = px.bar(df_cartao_ext.head(10), y='Estabelecimento', x='Valor (R$)',
+                                               orientation='h', title='Top 10 Gastos no Cartão de Crédito',
+                                               labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
+                                               text='Valor (R$)', height=400)
+                             fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                             fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
+                             st.plotly_chart(fig_card, use_container_width=True)
+                        # else: st.caption("Não foi possível extrair gastos no cartão.") # Já tratado na função
+
+                    else:
+                        st.info("Campo 'Informações Adicionais' vazio ou indisponível para gerar gráficos de fluxo.")
+                    # --- FIM MODIFICAÇÃO Bloco Gráficos ---
+
+                else:
+                    st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
+            #else:
+            #    st.info("Selecione um Indexador na lista acima para ver os detalhes.")
+    
 
 # ==============================================
 # INTERFACE PRINCIPAL
@@ -2005,14 +2437,15 @@ if st.session_state.data_loaded:
         options_envolvidos = ["Selecione..."]
 
     # --- Criação das Abas ---
-    tab_geral, tab_patterns, tab_network, tab_individual, tab_comunicacao, tabranking, tabranking_com = st.tabs([
+    tab_geral, tab_patterns, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
         "📊 Análise Geral",
         "⚠️ Padrões Suspeitos",
-        "🌐 Análise de Rede Individual",
-        "👤 Análise Individual Detalhada",
-        "🔎 Análise por Comunicação",
         "🏆 Ranking de Envolvidos",
+        "👤 Análise Individual Detalhada",
         "💬 Ranking de Comunicações",
+        "🔎 Análise por Comunicação",
+        "🌐 Análise de Rede Individual",
+
     ])
 
     # --- Conteúdo da Aba 1: Análise Geral ---
@@ -2628,7 +3061,7 @@ if st.session_state.data_loaded:
                 col5_ind.metric("Servidor Público", "Sim" if ser_flag else "Não")
 
                 # Comunicações
-                st.subheader("📋 Comunicações (Filtradas)")
+                st.subheader("📋 Comunicações e Ocorrências (Filtradas)")
                 cols_to_show_base = ['Indexador_x','idComunicacao', 'Data_da_operacao', 'Ocorrencia',
                                 'CidadeAgencia', 'NumeroAgencia', 'tipoEnvolvido',
                                 'CodigoSegmento', 'DescricaoCampos']
@@ -2685,33 +3118,45 @@ if st.session_state.data_loaded:
                 except Exception as e:
                     st.warning(f"Falha ao obter/calcular padrões suspeitos: {e}")
 
-                # --- NOVO: Navegação para Análise por Comunicação ---
+                # --- Gráfico de relacionamentos ---
                 st.divider()
-                st.subheader("Navegar para Detalhes da Comunicação")
+                st.subheader("Relacionamento com Contrapartes (Força dos Vínculos)")
+
+                # Usa o df_final filtrado atual (df_display) como base
+                if not df_display.empty and selected_cpf_individual:
+                    fig_rel = plot_relacionamentos_envolvido(df_display, selected_cpf_individual)
+                    if fig_rel is not None:
+                        st.plotly_chart(fig_rel, use_container_width=True)
+                    else:
+                        st.caption("Não foi possível identificar contrapartes suficientes para este envolvido nos dados filtrados.")
+                else:
+                    st.caption("Dados insuficientes para calcular vínculos para o envolvido selecionado.")
+
+
+
+                # --- NOVO: Navegação para Análise por Comunicação ---
+                #st.divider()
+                #st.subheader("Navegar para Detalhes da Comunicação")
 
                 # Obter lista única de Indexadores exibidos nesta tabela individual
-                indexadores_na_tabela = envolvido_data['Indexador_x'].unique().tolist()
+                
+                #indexadores_na_tabela = envolvido_data["Indexador_x"].astype(str).unique().tolist()
+                #if indexadores_na_tabela:
+                #    selected_indexador_jump = st.selectbox(
+                #        "Selecione um Indexador desta tabela para ver detalhes",
+                #        options=["Selecione..."] + indexadores_na_tabela,
+                #        key=f"jump_select_{selected_cpf_individual}",
+                #    )
 
-                if indexadores_na_tabela:
-                    selected_indexador_jump = st.selectbox(
-                        "Selecione um Indexador desta tabela para ver detalhes:",
-                        options=["Selecione..."] + indexadores_na_tabela,
-                        key=f"jump_select_{selected_cpf_individual}" # Chave única
-                    )
-
-                    if st.button("Ver Detalhes da Comunicação Selecionada", key=f"jump_button_{selected_cpf_individual}"):
-                        if selected_indexador_jump != "Selecione...":
-                            # Armazenar o Indexador alvo e o sinalizador no estado da sessão
-                            st.session_state.jump_target_indexador = selected_indexador_jump
-                            st.session_state.trigger_jump = True
-                            st.info(f"Indexador '{selected_indexador_jump}' selecionado. Navegue para a aba '🔎 Análise por Comunicação' para ver os detalhes.")
-                            # st.rerun() # Opcional: Forçar rerun pode limpar a seleção atual, mas garante estado
-                        else:
-                            st.warning("Por favor, selecione um Indexador da lista.")
-                else:
-                    st.info("Nenhuma comunicação específica para selecionar nesta visualização.")
-                # --- FIM NOVO ---
-
+                #    if st.button("Ver Detalhes da Comunicação Selecionada", key=f"jump_button_{selected_cpf_individual}"):
+                #        if selected_indexador_jump != "Selecione...":
+                #            st.markdown("---")
+                #            st.subheader(f"Detalhamento completo da comunicação (Indexador {selected_indexador_jump})")
+                #            render_analise_comunicacao(str(selected_indexador_jump))
+                #        else:
+                #            st.warning("Por favor, selecione um Indexador da lista.")
+                #else:
+                #    st.info("Nenhuma comunicação específica para selecionar nesta visualização.")
 
             else:
                 st.warning("Nenhum dado encontrado para este envolvido com os filtros atuais.")
@@ -3356,7 +3801,27 @@ if st.session_state.data_loaded:
 
                 df_rank_com_top = df_rank_com.head(top_n_com).copy()
                 df_rank_com_top.insert(0, "Posição", range(1, len(df_rank_com_top) + 1))
+                
+                df_env_base = st.session_state.df_envolvidos.copy()
+                df_env_base["Indexador"] = df_env_base["Indexador"].astype(str)
 
+                # Filtrar titulares
+                mask_titular = df_env_base["tipoEnvolvido"].str.lower().isin(["titular", "titular da conta"])
+                df_titulares = df_env_base[mask_titular].copy()
+
+                if not df_titulares.empty:
+                    # Nome(s) do(s) titular(es) por Indexador (se houver mais de um, junta com '; ')
+                    titulares_por_idx = (
+                        df_titulares.groupby("Indexador")["nomeEnvolvido"]
+                        .agg(lambda x: "; ".join(sorted(set(x))))
+                        .reset_index()
+                        .rename(columns={"nomeEnvolvido": "Titular"})
+                    )
+                else:
+                    titulares_por_idx = pd.DataFrame(columns=["Indexador", "Titular"])
+
+              
+                
                 # Métricas-resumo rápidas
                 col1c, col2c, col3c, col4c = st.columns(4)
                 col1c.metric("Total de Comunicações no Ranking", int(df_rank_com.shape[0]))
@@ -3380,11 +3845,23 @@ if st.session_state.data_loaded:
                 )
 
                 st.subheader("Tabela de Ranking de Comunicações")
+                
+                # df_rank_com_top tem Indexador_x, titulares_por_idx tem Indexador
+                df_rank_com_top = df_rank_com_top.merge(
+                    titulares_por_idx,
+                    left_on="Indexador_x",
+                    right_on="Indexador",
+                    how="left",
+                )
+
+                df_rank_com_top["Titular"] = df_rank_com_top["Titular"].fillna("N/D")
+
 
                 # Colunas principais
                 cols_basicas_com = [
                     "Posição",
                     "Indexador_x",
+                    "Titular",
                     "n_envolvidos",
                     "valor_total",
                     "pct_valor_especie_A",
@@ -3412,7 +3889,9 @@ if st.session_state.data_loaded:
                     )
 
                 cols_view_com = ["Posição", "Indexador_x"]
-
+    
+                if "Titular" in df_show_com.columns:
+                    cols_view_com.append("Titular")
                 if "n_envolvidos" in df_show_com.columns:
                     cols_view_com.append("n_envolvidos")
                 if "valor_total_fmt" in df_show_com.columns:
@@ -3439,6 +3918,10 @@ if st.session_state.data_loaded:
                 column_config_com = {
                     "Posição": st.column_config.NumberColumn("Posição", format="%d"),
                     "Indexador_x": st.column_config.TextColumn("Indexador"),
+                    "Titular": st.column_config.TextColumn(
+                        "Titular(es)",
+                        help="Nome(s) do(s) titular(es) da comunicação, quando identificado(s)",
+                    ),
                     "n_envolvidos": st.column_config.NumberColumn(
                         "Qtd. Envolvidos",
                         help="Número de envolvidos distintos na comunicação",
@@ -3508,7 +3991,7 @@ if st.session_state.data_loaded:
 
                     # Força o selectedindexador a ser o nosso escolhido
                     # e executa o mesmo conteúdo que você já tem em tabcomunicacao.
-                    comunicacaodetalhe = st.session_state.df_comunicacoes[
+                    comunicacao_detalhe = st.session_state.df_comunicacoes[
                         st.session_state.df_comunicacoes["Indexador"].astype(str) == str(selected_indexador)
                     ]
                     envolvidos_detalhe = st.session_state.df_envolvidos[
@@ -3519,13 +4002,9 @@ if st.session_state.data_loaded:
                         st.session_state.df_ocorrencias["Indexador"].astype(str) == str(selected_indexador)
                     ]
 
-                    if not comunicacaodetalhe.empty:
-                        comunicacao_info = comunicacaodetalhe.iloc[0]
+                    if not comunicacao_detalhe.empty:
+                        comunicacao_info = comunicacao_detalhe.iloc[0]
 
-                        # (A partir daqui você pode copiar exatamente o conteúdo da aba
-                        #  "Análise por Comunicação": métricas gerais, valores Campos A-E,
-                        #  titulares, envolvidos vinculados, ocorrências vinculadas,
-                        #  nuvem de palavras, etc., usando comunicacao_info/envolvidos_detalhe/ocorrencias_detalhe.)
                         # Exibir Informações Gerais da Comunicação
                         col1_comm, col2_comm, col3_comm = st.columns(3)
                         with col1_comm:
@@ -3813,8 +4292,7 @@ if st.session_state.data_loaded:
 
                         else:
                             st.info("Campo 'Informações Adicionais' vazio ou indisponível para gerar gráficos de fluxo.")
-                        # --- FIM MODIFICAÇÃO Bloco Gráficos ---
-                        
+                        # --- FIM MODIFICAÇÃO Bloco Gráficos ---                        
                         
                     else:
                         st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
