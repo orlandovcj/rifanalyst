@@ -2184,7 +2184,8 @@ if process_button and file_ocorrencias and file_envolvidos and file_comunicacoes
 
             st.write("Passo 4: Realizando merges...")
             comm_cols_merge_base = ['Indexador', 'idComunicacao', 'Data_da_operacao', 'CodigoSegmento', 'ValorTotal']
-            comm_cols_merge_vals = [f'Valor{c}' for c in ['A','B','C','D','E'] if f'Valor{c}' in df_comunicacoes.columns]
+            #comm_cols_merge_vals = [f'Valor{c}' for c in ['A','B','C','D','E'] if f'Valor{c}' in df_comunicacoes.columns]
+            comm_cols_merge_vals = [f'ValorCampo{c}' for c in ['A','B','C','D','E'] if f'ValorCampo{c}' in df_comunicacoes.columns]
             comm_cols_merge_info = ['informacoesAdicionais', 'CidadeAgencia', 'NumeroAgencia', 'UFAgencia']
             comm_cols_merge = list(set(comm_cols_merge_base + comm_cols_merge_vals + comm_cols_merge_info).intersection(df_comunicacoes.columns))
 
@@ -3822,7 +3823,7 @@ if st.session_state.data_loaded:
 
               
                 
-                # Métricas-resumo rápidas
+                # Métricas-resumo rápidas                
                 col1c, col2c, col3c, col4c = st.columns(4)
                 col1c.metric("Total de Comunicações no Ranking", int(df_rank_com.shape[0]))
                 col2c.metric(
