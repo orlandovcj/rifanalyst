@@ -2547,97 +2547,113 @@ if st.session_state.data_loaded:
                 },
                 hide_index=True
             )
-
-
-            #st.subheader("📋 Top 20 Ocorrências por Quantidade (Filtrado)")
-            # Selecionar e renomear colunas para a tabela
-            #top_ocorrencias_tabela = transactions_final_agg[['idOcorrencia', 'Ocorrencia', 'Quantidade', 'ValorTotal_fmt']].head(20)
-            #st.dataframe(
-            #    top_ocorrencias_tabela,
-            #    width='stretch',
-            #    column_config={
-            #        "idOcorrencia": "ID Ocorrência",
-            #        "Ocorrencia": st.column_config.TextColumn("Ocorrência", width="large"), # Aumentar largura
-            #        "Quantidade": "Qtd. Comunicações",
-            #        "ValorTotal_fmt": "Valor Total (R$)"
-            #     },
-            #     hide_index=True # Ocultar índice numérico padrão
-            #)
-
-
+           
             # Comunicações por Segmento
+            # --- CÓDIGO RESTAURADO E CORRIGIDO: Comunicações por Segmento ---
             st.subheader("📋 Comunicações por Segmento")
             st.info("⚠️ Para cada segmento, os campos de valores (CampoA,...,CampoE) do RIF possuem significados diferentes. Os valores totais desta tabela representam a soma dos valores no CampoA do RIF.")
 
-            if 'comm_filtered_tab1' in locals():
-                segment_communications = comm_filtered_tab1.groupby('CodigoSegmento').agg({
-                    'idComunicacao': 'nunique',
-                    'ValorTotal': 'sum' # ValorTotal é igual a ValorCampoA
+            if not df_display.empty:
+                # 1. ACHATAMENTO: Garante que pegamos o valor de cada RIF (Campo A) apenas uma vez por segmento
+                # Isso evita que o merge com envolvidos multiplique os valores totais
+                df_unique_seg = df_display.groupby(['Indexador_x', 'CodigoSegmento']).agg({
+                    'ValorTotal': 'max' # ValorTotal é o Campo A normalizado
                 }).reset_index()
-                segment_communications = pd.merge(segment_communications, df_segmento_desc, on='CodigoSegmento', how='left')
-                segment_communications['DescricaoCampos'].fillna('N/A', inplace=True)
 
-                segment_communications.columns = ['CodigoSegmento', 'Quantidade', 'ValorTotal', 'DescricaoCampos']
+                # 2. Agrupamento por Segmento
+                segment_communications = df_unique_seg.groupby('CodigoSegmento').agg(
+                    Quantidade=('Indexador_x', 'count'),
+                    ValorTotalReal=('ValorTotal', 'sum')
+                ).reset_index()
+
+                # 3. Cruzamento com a legenda de significados dos campos
+                segment_communications = pd.merge(segment_communications, df_segmento_desc, on='CodigoSegmento', how='left')
+                segment_communications['DescricaoCampos'] = segment_communications['DescricaoCampos'].fillna('Segmento não mapeado')
+
+                # 4. Ordenação e Formatação BRL
                 segment_communications = segment_communications.sort_values('Quantidade', ascending=False)
-                segment_communications['ValorTotal_fmt'] = segment_communications['ValorTotal'].apply(lambda x: f"R$ {x:,.2f}")
-                st.dataframe(segment_communications[['CodigoSegmento', 'Quantidade', 'ValorTotal_fmt', 'DescricaoCampos']], width='stretch', column_config={
-                    "CodigoSegmento": st.column_config.TextColumn("Código", width="small"),
-                    "Quantidade": st.column_config.NumberColumn("Qtd. Com.", help="Número de Comunicações"),
-                    "ValorTotal_fmt": st.column_config.TextColumn("Valor Total (R$)", help="Soma dos Valores (CampoA)"),
-                    "DescricaoCampos": st.column_config.TextColumn("Significado Campos", width="large")
-                },hide_index=True # Ocultar índice numérico padrão
+                segment_communications['ValorTotal_fmt'] = segment_communications['ValorTotalReal'].apply(
+                    lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 )
 
+                st.dataframe(
+                    segment_communications[['CodigoSegmento', 'Quantidade', 'ValorTotal_fmt', 'DescricaoCampos']], 
+                    width='stretch', 
+                    column_config={
+                        "CodigoSegmento": st.column_config.TextColumn("Código", width="small"),
+                        "Quantidade": st.column_config.NumberColumn("Qtd. Com.", help="Número de comunicações únicas"),
+                        "ValorTotal_fmt": st.column_config.TextColumn("Valor Total (Campo A)", help="Soma do valor principal (Campo A) por segmento"),
+                        "DescricaoCampos": st.column_config.TextColumn("Significado dos Campos", width="large")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.info("Nenhum dado disponível para análise por segmento.")
+
             # Análise temporal
-            st.subheader("📊 Evolução mensal das Comunicações")
+            # --- CÓDIGO CORRIGIDO: Evolução Temporal das Comunicações ---
+            st.subheader("📊 Evolução temporal das Comunicações")
 
             if 'Data_da_operacao' in df_display.columns and pd.api.types.is_datetime64_any_dtype(df_display['Data_da_operacao']):
                 df_temp = df_display.copy()
                 df_temp = df_temp.dropna(subset=['Data_da_operacao'])
-                if granularity == 'Diária':
-                    df_temp['Período'] = df_temp['Data_da_operacao'].dt.date
-                elif granularity == 'Semanal':
-                     if not df_temp.empty:
-                         df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('W').apply(lambda p: p.strftime('%Y-%U'))
-                     else: df_temp['Período'] = None
-                elif granularity == 'Mensal':
-                    df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('M').astype(str)
-                elif granularity == 'Trimestral':
-                    df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('Q').astype(str)
+                
+                if not df_temp.empty:
+                    # Definir a coluna de Período conforme a granularidade selecionada
+                    if granularity == 'Diária':
+                        df_temp['Período'] = df_temp['Data_da_operacao'].dt.date
+                    elif granularity == 'Semanal':
+                        df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('W').apply(lambda p: p.strftime('%Y-%U'))
+                    elif granularity == 'Mensal':
+                        df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('M').astype(str)
+                    elif granularity == 'Trimestral':
+                        df_temp['Período'] = df_temp['Data_da_operacao'].dt.to_period('Q').astype(str)
 
-                if 'Período' in df_temp.columns and not df_temp.empty:
-                    temporal = df_temp.groupby('Período').size().reset_index(name='Comunicações')
+                    # --- AJUSTE CRÍTICO: Contar Indexadores Únicos (nunique) em vez de linhas (size) ---
+                    temporal = df_temp.groupby('Período').agg(
+                        Comunicações=('Indexador_x', 'nunique')
+                    ).reset_index()
+                    
                     temporal = temporal.sort_values('Período')
 
-                    fig = px.line(temporal, x='Período', y='Comunicações', title=f'Evolução {granularity} das Comunicações (Filtrado)',
-                                  text='Comunicações')
+                    fig = px.line(
+                        temporal, 
+                        x='Período', 
+                        y='Comunicações', 
+                        title=f'Evolução {granularity} das Comunicações (Frequência Real)',
+                        text='Comunicações',
+                        markers=True
+                    )
                     fig.update_traces(textposition='top center')
-                    st.plotly_chart(fig, use_container_width=True)
-                # else: st.info("Não foi possível gerar análise temporal.") # Removido por redundância
-            # else: st.warning("Dados de data insuficientes.")
+                    st.plotly_chart(fig, use_container_width=True, key="evolucao_temporal_geral")
+                else:
+                    st.info("Nenhum dado com data válida para gerar a evolução temporal.")
 
-            # Top 10 Ocorrências
-            #st.subheader("🔎 Top 10 Ocorrências Mais Frequentes (Filtrado)")
-            #if 'transactions_final_agg' in locals() and not transactions_final_agg.empty:
-            #    top_ocorrencias_display = transactions_final_agg.head(10)
-            #    fig = px.bar(top_ocorrencias_display, x='Ocorrencia', y='Quantidade', title='Top 10 Ocorrências (Filtrado)',
-            #                 labels={'Ocorrencia': 'Ocorrência', 'Quantidade': 'Qtd. Comunicações'},
-            #                 hover_data=['idOcorrencia'])
-            #    st.plotly_chart(fig, use_container_width=True)
 
             # Top 50 Envolvidos
             st.subheader("🏆 Top 50 Envolvidos (por Quantidade de Comunicações)")
-            top_envolvidos = df_display.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                Quantidade=('idComunicacao', 'nunique'),
-                ValorTotal=('ValorTotal', 'sum') # Usar ValorTotal (CampoA)
+            # 1. Garantir valores únicos por Envolvido + Comunicação antes de somar
+            df_unique_env = df_display.groupby(['Indexador_x', 'cpfCnpjEnvolvido', 'nomeEnvolvido']).agg({
+                'ValorTotal': 'max'
+            }).reset_index()
+
+            # 2. Gerar o Top 50
+            top_envolvidos = df_unique_env.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
+                Quantidade=('Indexador_x', 'count'),
+                Valor_Total_A=('ValorTotal', 'sum')
             ).reset_index()
+
             top_envolvidos.columns = ['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A']
             top_envolvidos = top_envolvidos[top_envolvidos['CPF/CNPJ'] != 'DESCONHECIDO']
             top_envolvidos = top_envolvidos.sort_values('Qtd_Comunicacoes', ascending=False).head(50)
-            top_envolvidos['Valor_Total_A_fmt'] = top_envolvidos['Valor_Total_A'].apply(lambda x: f"R$ {x:,.2f}")
-            st.dataframe(top_envolvidos[['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A_fmt']], width='stretch',hide_index=True)
-
-            # --- NOVO: Top 510 Titulares/Sócios/Etc. ---
+            
+            # Formatação BRL
+            top_envolvidos['Valor_Total_A_fmt'] = top_envolvidos['Valor_Total_A'].apply(
+                lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            )
+            st.dataframe(top_envolvidos[['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A_fmt']], width='stretch', hide_index=True)
+            
+            # --- Top 50 Titulares/Sócios/Etc. ---
             if 'tipoEnvolvido' in df_display.columns:
                 # Aplica a função de normalização (maiusculas, sem acentos)
                 df_display['tipoEnvolvido_Norm'] = df_display['tipoEnvolvido'].apply(normalize_string)
@@ -2646,24 +2662,31 @@ if st.session_state.data_loaded:
                 df_display['tipoEnvolvido_Norm'] = "DESCONHECIDO"
 
             st.subheader("🏆 Top 50 Titulares, Sócios, Procuradores e Repres. (por Qtd. Comunicações)")
-            if 'tipoEnvolvido_Norm' in df_display.columns:
-                # Lista de papéis centrais NORMALIZADOS
+            
+            if 'tipoEnvolvido_Norm' in df_display.columns:               
                 papeis_centrais_norm = ['TITULAR', 'TITULAR DA CONTA', 'SOCIO', 'PROCURADOR', 'REPRESENTANTE', 'RESPONSAVEL', 'ADMINISTRADOR', 'PROCURADOR / REPRESENTANTE LEGAL']
                 df_centrais = df_display[df_display['tipoEnvolvido_Norm'].isin(papeis_centrais_norm)]
+            
+                # Lista de papéis centrais NORMALIZADOS
+                # 1. Obter base única filtrada pelos papéis centrais
+                df_centrais_unique = df_centrais.groupby(['Indexador_x', 'cpfCnpjEnvolvido', 'nomeEnvolvido']).agg({
+                    'ValorTotal': 'max'
+                }).reset_index()
 
-                if not df_centrais.empty:
-                    top_centrais = df_centrais.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                        Quantidade=('idComunicacao', 'nunique'),
-                        ValorTotalA=('ValorTotal', 'sum') # ValorTotal é CampoA
-                    ).reset_index()
+                # 2. Gerar o ranking
+                top_centrais = df_centrais_unique.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
+                    Quantidade=('Indexador_x', 'count'),
+                    Valor_Total_A=('ValorTotal', 'sum')
+                ).reset_index()
 
-                    top_centrais.columns = ['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A']
-                    top_centrais = top_centrais[top_centrais['CPF/CNPJ'] != 'DESCONHECIDO']
-                    top_centrais = top_centrais.sort_values('Qtd_Comunicacoes', ascending=False).head(50)
-                    top_centrais['Valor_Total_A_fmt'] = top_centrais['Valor_Total_A'].apply(lambda x: f"R$ {x:,.2f}")
-                    st.dataframe(top_centrais[['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A_fmt']], width='stretch', hide_index=True)
-                else:
-                    st.info("Nenhum envolvido com papéis centrais (Titular, Sócio, etc.) encontrado nos dados filtrados.")
+                top_centrais.columns = ['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A']
+                top_centrais = top_centrais[top_centrais['CPF/CNPJ'] != 'DESCONHECIDO']
+                top_centrais = top_centrais.sort_values('Qtd_Comunicacoes', ascending=False).head(50)
+                
+                top_centrais['Valor_Total_A_fmt'] = top_centrais['Valor_Total_A'].apply(
+                    lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                )
+                st.dataframe(top_centrais[['CPF/CNPJ', 'Nome', 'Qtd_Comunicacoes', 'Valor_Total_A_fmt']], width='stretch', hide_index=True)
             else:
                 st.info("Coluna 'tipoEnvolvido' ausente.")
 
@@ -2673,24 +2696,28 @@ if st.session_state.data_loaded:
             st.caption("Baseado em envolvidos com papel 'remetente' e somando ValorTotal (CampoA).")
             # Verificar 'ValorTotal' (CampoA) em vez de 'ValorCampoB'
             if 'tipoEnvolvido_Norm' in df_display.columns and 'ValorTotal' in df_display.columns:
-                # Usar coluna normalizada
+                # Usar coluna normalizada          
                 df_remetentes = df_display[df_display['tipoEnvolvido_Norm'] == 'REMETENTE']
 
-                if not df_remetentes.empty:
-                    top_remetentes = df_remetentes.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                        ValorTotalA=('ValorTotal', 'sum'), # Somar ValorTotal (CampoA)
-                        Quantidade=('idComunicacao', 'nunique')
-                    ).reset_index()
+                # 1. Obter base única de remetentes
+                df_rem_unique = df_remetentes.groupby(['Indexador_x', 'cpfCnpjEnvolvido', 'nomeEnvolvido']).agg({
+                    'ValorTotal': 'max'
+                }).reset_index()
 
-                    top_remetentes.columns = ['CPF/CNPJ', 'Nome', 'Valor_Total_A', 'Qtd_Comunicacoes']
-                    top_remetentes = top_remetentes[top_remetentes['CPF/CNPJ'] != 'DESCONHECIDO']
-                    top_remetentes = top_remetentes[top_remetentes['Valor_Total_A'] > 0]
-                    top_remetentes = top_remetentes.sort_values('Valor_Total_A', ascending=False).head(50)
-                    top_remetentes['Valor_Total_A_fmt'] = top_remetentes['Valor_Total_A'].apply(lambda x: f"R$ {x:,.2f}")
-                    # Exibir colunas corretas
-                    st.dataframe(top_remetentes[['CPF/CNPJ', 'Nome', 'Valor_Total_A_fmt', 'Qtd_Comunicacoes']], width='stretch', hide_index=True)
-                else:
-                    st.info("Nenhum envolvido com papel 'remetente' encontrado nos dados filtrados.")
+                # 2. Gerar ranking por Valor
+                top_remetentes = df_rem_unique.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
+                    Valor_Total_A=('ValorTotal', 'sum'),
+                    Qtd_Comunicacoes=('Indexador_x', 'count')
+                ).reset_index()
+
+                top_remetentes.columns = ['CPF/CNPJ', 'Nome', 'Valor_Total_A', 'Qtd_Comunicacoes']
+                top_remetentes = top_remetentes[top_remetentes['CPF/CNPJ'] != 'DESCONHECIDO']
+                top_remetentes = top_remetentes.sort_values('Valor_Total_A', ascending=False).head(50)
+                
+                top_remetentes['Valor_Total_A_fmt'] = top_remetentes['Valor_Total_A'].apply(
+                    lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                )
+                st.dataframe(top_remetentes[['CPF/CNPJ', 'Nome', 'Valor_Total_A_fmt', 'Qtd_Comunicacoes']], width='stretch', hide_index=True)
             else:
                 st.info("Colunas 'tipoEnvolvido' ou 'ValorTotal' ausentes para esta análise.")
             # --- FIM MODIFICAÇÃO ---
@@ -2700,58 +2727,134 @@ if st.session_state.data_loaded:
             st.caption("Baseado em envolvidos com papel 'beneficiário' e somando ValorTotal (CampoA).")
             # Verificar 'ValorTotal' (CampoA) em vez de 'ValorCampoC'
             if 'tipoEnvolvido_Norm' in df_display.columns and 'ValorTotal' in df_display.columns:
-                # Usar coluna normalizada (já cobre 'beneficiário', 'beneficiario', etc.)
                 df_benef = df_display[df_display['tipoEnvolvido_Norm'] == 'BENEFICIARIO']
+                # 1. Obter base única de beneficiários
+                df_ben_unique = df_benef.groupby(['Indexador_x', 'cpfCnpjEnvolvido', 'nomeEnvolvido']).agg({
+                    'ValorTotal': 'max'
+                }).reset_index()
 
-                if not df_benef.empty:
-                    top_benef = df_benef.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                        ValorTotalA=('ValorTotal', 'sum'), # Somar ValorTotal (CampoA)
-                        Quantidade=('idComunicacao', 'nunique')
-                    ).reset_index()
+                # 2. Gerar ranking por Valor
+                top_benef = df_ben_unique.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
+                    Valor_Total_A=('ValorTotal', 'sum'),
+                    Qtd_Comunicacoes=('Indexador_x', 'count')
+                ).reset_index()
 
-                    top_benef.columns = ['CPF/CNPJ', 'Nome', 'Valor_Total_A', 'Qtd_Comunicacoes']
-                    top_benef = top_benef[top_benef['CPF/CNPJ'] != 'DESCONHECIDO']
-                    top_benef = top_benef[top_benef['Valor_Total_A'] > 0]
-                    top_benef = top_benef.sort_values('Valor_Total_A', ascending=False).head(50)
-                    top_benef['Valor_Total_A_fmt'] = top_benef['Valor_Total_A'].apply(lambda x: f"R$ {x:,.2f}")
-                    # Exibir colunas corretas
-                    st.dataframe(top_benef[['CPF/CNPJ', 'Nome', 'Valor_Total_A_fmt', 'Qtd_Comunicacoes']], width='stretch', hide_index=True)
-                else:
-                    st.info("Nenhum envolvido com papel 'beneficiário' encontrado nos dados filtrados.")
+                top_benef.columns = ['CPF/CNPJ', 'Nome', 'Valor_Total_A', 'Qtd_Comunicacoes']
+                top_benef = top_benef[top_benef['CPF/CNPJ'] != 'DESCONHECIDO']
+                top_benef = top_benef.sort_values('Valor_Total_A', ascending=False).head(50)
+                
+                top_benef['Valor_Total_A_fmt'] = top_benef['Valor_Total_A'].apply(
+                    lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                )
+                st.dataframe(top_benef[['CPF/CNPJ', 'Nome', 'Valor_Total_A_fmt', 'Qtd_Comunicacoes']], width='stretch', hide_index=True)
             else:
                 st.info("Colunas 'tipoEnvolvido' ou 'ValorTotal' ausentes para esta análise.")
+               
             # --- FIM MODIFICAÇÃO ---
 
             # Comunicações por Cidade da Agência
-            st.subheader("🏙️ Comunicações por Cidade da Agência (Filtrado)")
-            if 'comm_filtered_tab1' in locals() and 'CidadeAgencia' in comm_filtered_tab1.columns:
-                 # Usar .copy() para evitar SettingWithCopyWarning
-                 comm_filtered_city = comm_filtered_tab1.dropna(subset=['CidadeAgencia', 'UFAgencia']).copy()
+            st.subheader("🏙️ Comunicações por Cidade da Agência (Filtrado)")            
+            if 'CidadeAgencia' in df_display.columns:
+                # 1. Filtramos apenas linhas com dados de localidade
+                df_city_temp = df_display.dropna(subset=['CidadeAgencia', 'UFAgencia']).copy()
+                
+                if not df_city_temp.empty:
+                    # 2. Normalização para evitar duplicatas por grafia (ex: 'SÃO PAULO' vs 'Sao Paulo')
+                    df_city_temp['Cidade_Norm'] = df_city_temp['CidadeAgencia'].apply(normalize_string)
+                    df_city_temp['UF_Norm'] = df_city_temp['UFAgencia'].apply(normalize_string)
 
-                 if not comm_filtered_city.empty:
-                     # --- CORREÇÃO: Normalizar Nomes de Cidades ---
-                     comm_filtered_city['Cidade_Norm'] = comm_filtered_city['CidadeAgencia'].apply(normalize_string)
-                     # Também normalizar UF para consistência
-                     comm_filtered_city['UF_Norm'] = comm_filtered_city['UFAgencia'].apply(normalize_string)
+                    # 3. ACHATAMENTO: Garante 1 valor real por RIF dentro de cada cidade
+                    # (Previne o bug dos valores bilionários nas cidades)
+                    df_unique_city = df_city_temp.groupby(['Indexador_x', 'Cidade_Norm', 'UF_Norm']).agg({
+                        'ValorTotal': 'max'
+                    }).reset_index()
 
-                     # Agrupar por Indexador e CIDADE/UF NORMALIZADA
-                     comm_city_val = comm_filtered_city.groupby(['Indexador', 'Cidade_Norm', 'UF_Norm'])['ValorCampoA'].sum().reset_index()
+                    # 4. Agrupamento final para o Ranking
+                    city_communications = df_unique_city.groupby(['Cidade_Norm', 'UF_Norm']).agg(
+                        Quantidade=('Indexador_x', 'count'),
+                        ValorTotalReal=('ValorTotal', 'sum')
+                    ).reset_index()
 
-                     # Agrupar novamente pela CIDADE/UF NORMALIZADA para a tabela final
-                     city_communications = comm_city_val.groupby(['Cidade_Norm', 'UF_Norm']).agg(
-                         ValorTotal=('ValorCampoA', 'sum'),
-                         Quantidade=('Indexador', 'nunique')
-                     ).reset_index()
-                     # --- FIM CORREÇÃO ---
+                    # 5. Ordenação e Formatação BRL
+                    city_communications = city_communications.sort_values('ValorTotalReal', ascending=False)
+                    city_communications['Valor Total (R$)'] = city_communications['ValorTotalReal'].apply(
+                        lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    )
 
-                     city_communications.columns = ['Cidade', 'UF', 'Valor Total', 'Quantidade'] # Renomear Cidade_Norm -> Cidade
-                     city_communications = city_communications.sort_values('Valor Total', ascending=False)
-                     city_communications['Valor Total (R$)'] = city_communications['Valor Total'].apply(lambda x: f"R$ {x:,.2f}")
-                     st.dataframe(city_communications[['Cidade', 'UF', 'Valor Total (R$)', 'Quantidade']].head(20), width='stretch',hide_index=True)
-                 else:
-                     st.info("Nenhuma comunicação com info de cidade nos dados filtrados.")
+                    st.dataframe(
+                        city_communications[['Cidade_Norm', 'UF_Norm', 'Valor Total (R$)', 'Quantidade']].head(20),
+                        width='stretch',
+                        column_config={
+                            "Cidade_Norm": "Cidade",
+                            "UF_Norm": "UF",
+                            "Quantidade": "Qtd. Com."
+                        },
+                        hide_index=True
+                    )
+                else:
+                    st.info("Nenhuma comunicação com info de cidade nos dados filtrados.")
             else:
-                st.info("Coluna 'CidadeAgencia' ausente ou sem dados.")
+                st.info("Coluna 'CidadeAgencia' ausente ou sem dados no arquivo original.")
+                
+                
+            # --- NOVA TABELA: Detalhamento de Movimentações em Espécie ---
+            st.divider()
+            st.subheader("💵 Detalhamento de Movimentações em Espécie")
+            st.caption("Identificação baseada nos campos específicos de cada segmento que registram valores em espécie.")
+            
+            # 1. Mapeamento dos campos que contém valores em espécie por segmento (conforme SEGMENTO_MAP)
+            especie_field_map = {
+                '17': 'ValorCampoD', '19': 'ValorCampoB', '23': 'ValorCampoB', 
+                '15': 'ValorCampoB', '46': 'ValorCampoB', '48': 'ValorCampoB', 
+                '49': 'ValorCampoB', '51': 'ValorCampoB', '52': 'ValorCampoB'
+            }
+            
+            # 2. Filtrar df_display para os segmentos que possuem reporte de espécie
+            df_esp_base = df_display[df_display['CodigoSegmento'].isin(especie_field_map.keys())].copy()
+            
+            if not df_esp_base.empty:
+                # Função para extrair o valor da coluna correta baseada no mapeamento
+                def map_especie_val(row):
+                    col_target = especie_field_map.get(row['CodigoSegmento'])
+                    return row.get(col_target, 0.0)
+
+                df_esp_base['ValorEspecieReal'] = df_esp_base.apply(map_especie_val, axis=1)
+                
+                # Filtrar apenas registros onde houve valor em espécie > 0
+                df_esp_base = df_esp_base[df_esp_base['ValorEspecieReal'] > 0]
+                
+                if not df_esp_base.empty:
+                    # 3. ACHATAMENTO: Garantir unicidade por Envolvido + Indexador (Evita inflar valores por ocorrências)
+                    df_esp_final = df_esp_base.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido', 'Indexador_x', 'CodigoSegmento', 'DescricaoCampos']).agg({
+                        'ValorEspecieReal': 'max'
+                    }).reset_index()
+                    
+                    # Ordenar pelos maiores valores movimentados em espécie
+                    df_esp_final = df_esp_final.sort_values('ValorEspecieReal', ascending=False)
+                    
+                    # 4. Formatação para Moeda Brasileira (R$)
+                    df_esp_final['Valor_Especie_fmt'] = df_esp_final['ValorEspecieReal'].apply(
+                        lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    )
+                    
+                    # 5. Exibição da Tabela
+                    st.dataframe(
+                        df_esp_final[['cpfCnpjEnvolvido', 'nomeEnvolvido', 'Indexador_x', 'Valor_Especie_fmt', 'CodigoSegmento', 'DescricaoCampos']],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "cpfCnpjEnvolvido": "CPF/CNPJ",
+                            "nomeEnvolvido": "Nome",
+                            "Indexador_x": "Indexador",
+                            "Valor_Especie_fmt": "Valor em Espécie",
+                            "CodigoSegmento": "Cód. Seg.",
+                            "DescricaoCampos": st.column_config.TextColumn("Descrição do Segmento", width="large")
+                        }
+                    )
+                else:
+                    st.info("Nenhuma movimentação em espécie com valor superior a zero foi identificada nos dados filtrados.")
+            else:
+                st.info("Não há comunicações de segmentos com reporte de espécie nos dados filtrados.")                
 
             # --- MODIFICADO: Top 10 Depositantes em ESPÉCIE ---
             st.subheader("💰 Top 10 Depositantes (em Espécie)")
@@ -2814,38 +2917,73 @@ if st.session_state.data_loaded:
                 st.info("Colunas 'tipoEnvolvido' ou 'idOcorrencia' ausentes para esta análise.")
             # --- FIM MODIFICAÇÃO ---
             
-            st.subheader("Lei de Benford – Valores das Transações (CampoA)")
-            fig_benford = analise_benford(df_display)  # dfdisplay = dffinal filtrado
+            st.subheader("Lei de Benford – Valores das Transações (CampoA)")    
+            
+            # --- Análise da Lei de Benford ---
+            # Usamos nunique no Indexador para ignorar as linhas duplicadas do merge
+            real_count = df_display['Indexador_x'].nunique()
+            
+            # Aviso de amostragem usando a contagem real
+            if real_count < 500:
+                st.info("""
+                ⚠️ **Atenção:** A Lei de Benford é estatisticamente robusta apenas para grandes amostras.  
+                A literatura técnica recomenda, no mínimo, 500 a 1.000 registros para que as conclusões sejam confiáveis.  \n Como o filtro atual contém **{0} comunicações**, use este gráfico apenas como tendência visual.
+                """.format(real_count))
+            else:
+                st.info("""
+                ⚠️ **Atenção:** A Lei de Benford é estatisticamente robusta apenas para grandes amostras.  
+                A literatura técnica recomenda, no mínimo, 500 a 1.000 registros para que as conclusões sejam confiáveis.  \n O filtro atual contém **{0} comunicações**.
+                """.format(real_count))
+
+            # --- CORREÇÃO 2: Achatamento para o Cálculo Estatístico ---
+            # Criamos uma versão temporária com apenas uma linha por comunicação (RIF)
+            # Isso impede que o gráfico conte o valor do Campo A repetidamente para cada envolvido
+            df_benford_input = df_display.drop_duplicates(subset=['Indexador_x'])
+            
+            fig_benford = analise_benford(df_benford_input)  
+            
             if fig_benford is not None:
-                st.plotly_chart(fig_benford, use_container_width=True)
+                st.plotly_chart(fig_benford, use_container_width=True, key="benford_plot_geral_corrigido")
             else:
                 st.caption("Não há valores positivos suficientes em 'ValorTotal' para aplicar Benford.")
-
+                
+            
+            
             # Análises de PEPs, Pessoas Obrigadas, Servidores
+            # --- CÓDIGO CORRIGIDO: PEPs sem duplicidade por ocorrência ---
             if 'bitPepCitado' in df_display.columns:
                 st.subheader("👤 PEPs Identificados e Comunicações Associadas")
                 st.info("⚠️ Use o Identificador para localizar a comunicação na aba Análise por Comunicação.")
-                # Filtrar o dataframe filtrado (df_display) para encontrar linhas onde bitPepCitado é True
-                peps_identificados_df = df_display[df_display['bitPepCitado'] == True].copy() # Use .copy()
+                
+                # 1. Filtrar apenas envolvidos marcados como PEP
+                df_pep_base = df_display[df_display['bitPepCitado'] == True].copy()
 
-                if not peps_identificados_df.empty:
-                    # Selecionar colunas relevantes para a tabela
-                    cols_to_show_pep = [
-                        'Indexador_x', 'idComunicacao', 'Data_da_operacao',
-                        'cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido', # Papel do PEP na comunicação
-                        'ValorTotal', # Valor principal (CampoA)
-                        'Ocorrencia', # Ocorrência associada
-                        'DescricaoCampos' # Contexto dos valores (se disponível)
-                    ]
-                    # Garantir que as colunas existem no dataframe
-                    cols_exist_pep = [col for col in cols_to_show_pep if col in peps_identificados_df.columns]
+                if not df_pep_base.empty:
+                    # 2. ACHATAMENTO: Agrupamos por Indexador, CPF e Papel (tipoEnvolvido)
+                    # Usamos 'max' para o valor e unimos as ocorrências em uma string única
+                    pep_final = df_pep_base.groupby([
+                        'Indexador_x', 'idComunicacao', 'Data_da_operacao', 
+                        'cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido', 
+                        'DescricaoCampos'
+                    ]).agg({
+                        'ValorTotal': 'max',
+                        'Ocorrencia': lambda x: " | ".join(sorted(set(x.astype(str)))) # Une ocorrências únicas
+                    }).reset_index()
 
-                    # Opcional: Ordenar para agrupar por PEP ou por data
-                    peps_identificados_df = peps_identificados_df.sort_values(by=['nomeEnvolvido', 'Data_da_operacao'], ascending=[True, False])
+                    # 3. Ordenação por Nome e Data (Mais recente primeiro)
+                    pep_final = pep_final.sort_values(by=['nomeEnvolvido', 'Data_da_operacao'], ascending=[True, False])
 
-                    # Exibir a tabela
+                    # 4. Formatação BRL para o valor
+                    pep_final['Valor_Total_fmt'] = pep_final['ValorTotal'].apply(
+                        lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    )
+
+                    # 5. Exibição da Tabela
                     st.dataframe(
-                        peps_identificados_df[cols_exist_pep],
+                        pep_final[[
+                            'Indexador_x', 'idComunicacao', 'Data_da_operacao', 'cpfCnpjEnvolvido', 
+                            'nomeEnvolvido', 'tipoEnvolvido', 'Valor_Total_fmt', 'Ocorrencia', 'DescricaoCampos'
+                        ]],
                         width='stretch',
                         column_config={
                             "Indexador_x": "Indexador",
@@ -2854,11 +2992,11 @@ if st.session_state.data_loaded:
                             "cpfCnpjEnvolvido": "CPF/CNPJ PEP",
                             "nomeEnvolvido": "Nome PEP",
                             "tipoEnvolvido": "Papel na Com.",
-                            "ValorTotal": st.column_config.NumberColumn("Valor Principal (CampoA)", format="R$ %.2f"),
-                            "Ocorrencia": st.column_config.TextColumn("Ocorrência", width="medium"),
-                            "DescricaoCampos": st.column_config.TextColumn("Contexto Valor", width="medium", help="Significado dos Campos A-E para o Segmento")
+                            "Valor_Total_fmt": "Valor Principal (CampoA)",
+                            "Ocorrencia": st.column_config.TextColumn("Ocorrências Identificadas", width="large"),
+                            "DescricaoCampos": st.column_config.TextColumn("Contexto Valor", width="medium")
                         },
-                        hide_index=True # Ocultar índice numérico padrão
+                        hide_index=True
                     )
                 else:
                     st.info("Nenhum PEP identificado nos dados filtrados.")
@@ -3733,8 +3871,8 @@ if st.session_state.data_loaded:
                 criterio_map_com = {
                     "Valor total (R$)": "valor_total",
                     "Quantidade de envolvidos": "n_envolvidos",
-                    "% valor em espécie CampoA": "pct_valor_especie_A",
-                    "% valor em espécie CampoB": "pct_valor_especie_B",
+                    #"% valor em espécie CampoA": "pct_valor_especie_A",
+                    #"% valor em espécie CampoB": "pct_valor_especie_B",
                 }
 
                 criterio_escolhido_com = st.selectbox(
