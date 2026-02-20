@@ -406,6 +406,62 @@ def plot_relacionamentos_envolvido(df_full: pd.DataFrame, cpf_base: str):
 
     return fig
 
+def plot_sankey_envolvido_estruturado(df_envolvido_full, selected_cpf, selected_nome, min_value=0, top_n=10):
+    """
+    Gera um Sankey com filtros de valor mínimo e limitador de contrapartes.
+    Agrupa valores pequenos em um nó 'Outros'.
+    """
+    rifs_do_alvo = df_envolvido_full[df_envolvido_full['cpfCnpjEnvolvido'] == selected_cpf]['Indexador_x'].unique()
+    df_contexto = df_envolvido_full[df_envolvido_full['Indexador_x'].isin(rifs_do_alvo)].copy()
+    
+    # Achatamento para evitar duplicidade de ocorrências
+    df_unique = df_contexto.groupby(['Indexador_x', 'cpfCnpjEnvolvido', 'tipoEnvolvido_Norm']).agg({
+        'nomeEnvolvido': 'first',
+        'ValorTotal': 'max'
+    }).reset_index()
+
+    # Agregação por contraparte para aplicar filtros
+    fluxos = []
+    for idx in rifs_do_alvo:
+        rif_data = df_unique[df_unique['Indexador_x'] == idx]
+        v = rif_data['ValorTotal'].max()
+        
+        # Mapeamento de Entradas (Verde) e Saídas (Vermelho)
+        for _, row in rif_data.iterrows():
+            if row['cpfCnpjEnvolvido'] == selected_cpf: continue
+            
+            tipo = 'Entrada' if row['tipoEnvolvido_Norm'] in ['REMETENTE', 'DEPOSITANTE'] else \
+                   'Saída' if row['tipoEnvolvido_Norm'] in ['BENEFICIARIO', 'SACADOR'] else None
+            
+            if tipo:
+                fluxos.append({'Entidade': row['nomeEnvolvido'], 'Valor': v, 'Tipo': tipo})
+
+    if not fluxos: return None
+    df_f = pd.DataFrame(fluxos).groupby(['Entidade', 'Tipo'])['Valor'].sum().reset_index()
+
+    # Aplicação de Filtros: Valor Mínimo e Top N
+    df_f = df_f[df_f['Valor'] >= min_value]
+    df_f = df_f.sort_values('Valor', ascending=False).head(top_n * 2) # Top N entradas + Top N saídas
+
+    sources, targets, values, labels, colors = [], [], [], [selected_nome], []
+    
+    for _, row in df_f.iterrows():
+        if row['Entidade'] not in labels: labels.append(row['Entidade'])
+        idx_ent = labels.index(row['Entidade'])
+        
+        if row['Tipo'] == 'Entrada':
+            sources.append(idx_ent); targets.append(0); colors.append("rgba(46, 204, 113, 0.4)")
+        else:
+            sources.append(0); targets.append(idx_ent); colors.append("rgba(231, 76, 60, 0.4)")
+        values.append(row['Valor'])
+
+    fig = go.Figure(data=[go.Sankey(
+        node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=labels, color="#3498DB"),
+        link=dict(source=sources, target=targets, value=values, color=colors)
+    )])
+    fig.update_layout(title_text=f"Fluxo Financeiro Filtrado (Top {top_n}): {selected_nome}", font_size=10, height=600)
+    return fig
+
 
 # --- NOVO: Função para simplificar o grafo individual ---
 def simplify_graph(G_original, central_node):
@@ -2458,38 +2514,39 @@ if st.session_state.data_loaded:
             # Quantidade de transações por tipo de ocorrência
             st.subheader("📋 Transações Comunicadas por Tipo de Ocorrência")
             st.info("⚠️ Os valores totais representam a soma dos valores no CampoA do RIF.")
-            transactions_by_ocorrencia_agg_base = df_display.groupby(['idOcorrencia', 'Ocorrencia']).agg(
-                Quantidade=('Indexador_x', 'nunique'),
+            
+            # 1. Criamos uma base única de (Comunicação x Ocorrência) 
+            # Isso garante que pegamos o valor real de cada RIF apenas uma vez por tipo de ocorrência
+            # eliminando as duplicatas geradas pelo merge com envolvidos.
+            df_unique_comm_ocor = df_display.groupby(['Indexador_x', 'idOcorrencia', 'Ocorrencia']).agg({
+                'ValorTotal': 'max'
+            }).reset_index()
+
+            # 2. Agora agrupamos por Ocorrência para a tabela final
+            transactions_final_agg = df_unique_comm_ocor.groupby(['idOcorrencia', 'Ocorrencia']).agg(
+                Quantidade=('Indexador_x', 'count'),
+                ValorTotalReal=('ValorTotal', 'sum')
             ).reset_index()
 
-            comm_filtered_tab1 = st.session_state.df_comunicacoes[st.session_state.df_comunicacoes['Indexador'].isin(valid_indexadores_geral)]
-            ocor_filtered_tab1 = st.session_state.df_ocorrencias[st.session_state.df_ocorrencias['Indexador'].isin(valid_indexadores_geral)][['Indexador', 'idOcorrencia', 'Ocorrencia']].drop_duplicates()
-
-            value_by_indexador_filt_tab1 = comm_filtered_tab1.groupby('Indexador')['ValorCampoA'].sum().reset_index()
-            transactions_by_ocorrencia_filt_tab1 = pd.merge(ocor_filtered_tab1, value_by_indexador_filt_tab1, on='Indexador', how='left')
-
-            transactions_by_ocorrencia_agg_val_tab1 = transactions_by_ocorrencia_filt_tab1.groupby(['idOcorrencia', 'Ocorrencia']).agg(
-                 ValorTotalReal=('ValorCampoA', 'sum')
-            ).reset_index()
-
-            transactions_final_agg = pd.merge(
-                transactions_by_ocorrencia_agg_base,
-                transactions_by_ocorrencia_agg_val_tab1,
-                on=['idOcorrencia', 'Ocorrencia'],
-                how='left'
-            ).fillna({'ValorTotalReal': 0})
-
+            # Ordenação por quantidade
             transactions_final_agg = transactions_final_agg.sort_values('Quantidade', ascending=False)
-            transactions_final_agg['ValorTotal_fmt'] = transactions_final_agg['ValorTotalReal'].apply(lambda x: f"R$ {x:,.2f}")
+            
+            # Formatação de Moeda Brasileira (R$ 1.234,56)
+            transactions_final_agg['ValorTotal_fmt'] = transactions_final_agg['ValorTotalReal'].apply(
+                lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            )
 
-            st.dataframe(transactions_final_agg[['idOcorrencia', 'Ocorrencia', 'Quantidade', 'ValorTotal_fmt']],
-                         width='stretch',
-                         column_config={
-                             "idOcorrencia": "ID Ocorrência", "Ocorrencia": "Ocorrência",
-                             "Quantidade": "Qtd. Comunicações", "ValorTotal_fmt": "Valor Total (R$)"
-                         },
-                         hide_index=True # Ocultar índice numérico padrão
-                         )
+            st.dataframe(
+                transactions_final_agg[['idOcorrencia', 'Ocorrencia', 'Quantidade', 'ValorTotal_fmt']],
+                width='stretch',
+                column_config={
+                    "idOcorrencia": "ID Ocorrência", 
+                    "Ocorrencia": st.column_config.TextColumn("Ocorrência", width="large"),
+                    "Quantidade": "Qtd. Comunicações", 
+                    "ValorTotal_fmt": "Valor Total (R$)"
+                },
+                hide_index=True
+            )
 
 
             #st.subheader("📋 Top 20 Ocorrências por Quantidade (Filtrado)")
@@ -3123,7 +3180,26 @@ if st.session_state.data_loaded:
                 else:
                     st.caption("Dados insuficientes para calcular vínculos para o envolvido selecionado.")
 
-
+                # --- NOVO: Diagrama de Fluxo Estruturado (Aba Detalhada) ---
+                st.divider()
+                st.subheader("🌊 Diagrama de Fluxo (Sankey Estruturado)")
+                st.caption("Baseado nos papéis (Remetente/Beneficiário) registrados nas comunicações.")
+                
+                # Controles com chave única para esta aba (prefixo ind_)
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    v_min_ind = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"ind_vmin_{selected_cpf_individual}")
+                with col_f2:
+                    n_links_ind = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"ind_nlinks_{selected_cpf_individual}")
+                
+                with st.spinner("Gerando diagrama de fluxo..."):
+                    fig_sankey_ind_detalhada = plot_sankey_envolvido_estruturado(df_display, selected_cpf_individual, nome, min_value=v_min_ind, top_n=n_links_ind)
+                    
+                    if fig_sankey_ind_detalhada:
+                        st.plotly_chart(fig_sankey_ind_detalhada, use_container_width=True, key=f"sankey_ind_plot_{selected_cpf_individual}")
+                    else:
+                        st.info("Não há dados de contrapartes registrados como remetentes ou beneficiários para este envolvido nos RIFs filtrados.")
+                
 
                 # --- NOVO: Navegação para Análise por Comunicação ---
                 #st.divider()
@@ -3596,7 +3672,8 @@ if st.session_state.data_loaded:
                     sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
 
                     st.markdown("---")
-                    st.subheader(f"🔍 Padrões Identificados: {sel_nome}")
+                    # Exibe a tabela de padrões identificados
+                    st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
                     
                     detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
                     if not detalhes_alvo.empty:
@@ -3607,6 +3684,31 @@ if st.session_state.data_loaded:
                         )
                     else:
                         st.info("Este alvo possui score baseado apenas em indicadores matemáticos (HHI, PEP ou Volume).")
+
+                # H. Detalhamento de Fluxo e Padrões ao Selecionar Linha
+                selection = sel_rank.get("selection", {}).get("rows", [])
+                if selection:
+                    row_idx = selection[0]
+                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
+                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
+
+                    st.markdown("---")
+                    st.subheader(f"🔍 Análise de Fluxo Estruturado: {sel_nome}")
+                    
+                    # Controles com chave única para esta aba (prefixo rank_)
+                    col_rf1, col_rf2 = st.columns(2)
+                    with col_rf1:
+                        v_min_rank = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"rank_vmin_{sel_cpf}")
+                    with col_rf2:
+                        n_links_rank = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"rank_nlinks_{sel_cpf}")
+                    
+                    with st.spinner("Gerando diagrama de fluxo..."):
+                        fig_sankey_ranking = plot_sankey_envolvido_estruturado(df_display, sel_cpf, sel_nome, min_value=v_min_rank, top_n=n_links_rank)
+                        
+                        if fig_sankey_ranking:
+                            st.plotly_chart(fig_sankey_ranking, use_container_width=True, key=f"sankey_rank_plot_{sel_cpf}")
+                        else:
+                            st.info("Não há vínculos estruturados suficientes para este alvo nos RIFs filtrados.")
 
 
     # --- Conteúdo da Aba 7: Ranking de Comunicações ---
