@@ -15,6 +15,7 @@ import unicodedata
 import traceback # Para depuração de erros
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import openpyxl
 import string 
 import io
 import indicadores as rif_ind
@@ -1801,349 +1802,213 @@ def analise_benford(df):
                  title='Análise da Lei de Benford (Detecção de Anomalias Numéricas)')
     return fig
 
-def render_analise_comunicacao(selected_indexador: str):
+def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"):
     """
-    Renderiza todo o conteúdo da aba 'Análise por Comunicação'
-    para o Indexador selecionado.
-    Reutiliza st.session_state.dfcomunicacoes, dfenvolvidos, dfocorrencias, df_segmento_desc, etc.
+    Renderiza o detalhamento da comunicação com seções restauradas e tags de risco corrigidas.
     """
-    import pandas as pd
-
-    if (
-        "df_comunicacoes" not in st.session_state
-        or st.session_state.df_comunicacoes is None
-        or st.session_state.df_comunicacoes.empty
-    ):
-        st.warning("DataFrame de comunicações não está disponível.")
+    if "df_final" not in st.session_state or st.session_state.df_final is None:
+        st.warning("Dados não processados.")
         return
 
-    df_comunicacoes = st.session_state.df_comunicacoes
-    df_envolvidos = st.session_state.df_envolvidos
-    df_ocorrencias = st.session_state.df_ocorrencias
-
-    # Filtrar dados para o Indexador selecionado (mesma lógica da aba 5)
-    comunicacao_detalhe = df_comunicacoes[df_comunicacoes["Indexador"].astype(str) == str(selected_indexador)]
-    envolvidos_detalhe = df_envolvidos[
-        df_envolvidos["Indexador"].astype(str).str.strip() == str(selected_indexador).strip()
-    ]
-    ocorrencias_detalhe = df_ocorrencias[df_ocorrencias["Indexador"].astype(str) == str(selected_indexador)]
+    # 1. Filtros Iniciais (Garantindo tipos corretos)
+    df_base = st.session_state.df_final
+    comunicacao_detalhe = df_base[df_base['Indexador_x'].astype(str) == str(selected_indexador)].copy()
+    # Usamos o df_envolvidos original para a tabela detalhada de envolvidos
+    envolvidos_raw = st.session_state.df_envolvidos[st.session_state.df_envolvidos['Indexador'].astype(str).str.strip() == str(selected_indexador).strip()]
 
     if comunicacao_detalhe.empty:
-        st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
+        st.warning(f"Indexador {selected_indexador} não encontrado.")
         return
 
     comunicacao_info = comunicacao_detalhe.iloc[0]
+    st.subheader(f"🔍 Detalhes da Comunicação: {selected_indexador}")
 
-    # A partir daqui, copie exatamente o conteúdo que hoje está dentro de `if selected_indexador != "Selecione"...`
-    # na aba "Análise por Comunicação": métricas gerais, Campos A–E, titulares, infos adicionais, wordcloud,
-    # fluxos, gráficos, grafo da comunicação etc., só substituindo `selectedindexador` pela variável local.
-    # Exemplo simplificado:
+    # 2. Layout de Cabeçalho (3 Colunas)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("ID Comunicação", comunicacao_info.get('idComunicacao', 'N/A'))
+        st.metric("Data Operação", comunicacao_info.get('Data_da_operacao', pd.NaT).strftime('%d/%m/%Y') if pd.notna(comunicacao_info.get('Data_da_operacao')) else 'N/A')
+    with c2:
+        st.metric("Comunicante", comunicacao_info.get('nomeComunicante', 'N/A'))
+        st.metric("Cidade/UF", f"{comunicacao_info.get('CidadeAgencia', 'N/A')} / {comunicacao_info.get('UFAgencia', 'N/A')}")
+    with c3:
+        st.metric("Segmento", comunicacao_info.get('CodigoSegmento', 'N/A'))
+        if 'DescricaoCampos' in comunicacao_info:
+            st.info(f"Significado dos campos de valores (A,B,C,D,E) no segmento : \n\n {comunicacao_info['DescricaoCampos']}")
 
-    if selected_indexador != "Selecione...":
-        st.subheader(f"Detalhes da Comunicação Indexador: {selected_indexador}")
+    st.divider()
 
-        # Filtrar dados para o Indexador selecionado
-        comunicacao_detalhe = st.session_state.df_comunicacoes[st.session_state.df_comunicacoes['Indexador'] == selected_indexador]
-        envolvidos_detalhe = st.session_state.df_envolvidos[st.session_state.df_envolvidos['Indexador'].astype(str).str.strip() == str(selected_indexador).strip()]
-        ocorrencias_detalhe = st.session_state.df_ocorrencias[st.session_state.df_ocorrencias['Indexador'] == selected_indexador]
+    # 3. Seção de Titulares (CORREÇÃO DE TAGS PEP/SERVIDOR)
+    st.subheader("👤 Titular(es) da Comunicação")
+    titulares_df = comunicacao_detalhe[
+        comunicacao_detalhe['tipoEnvolvido'].astype(str).str.lower().str.strip().str.contains('titular', na=False)
+    ].drop_duplicates(subset=['cpfCnpjEnvolvido'])
 
-        if not comunicacao_detalhe.empty:
-            comunicacao_info = comunicacao_detalhe.iloc[0] # Pega a primeira (e única) linha
-            # Exibir Informações Gerais da Comunicação
-            col1_comm, col2_comm, col3_comm = st.columns(3)
-            with col1_comm:
-                st.metric("ID Comunicação", comunicacao_info.get('idComunicacao', 'N/A'))
-                st.metric("Data Operação", comunicacao_info.get('Data_da_operacao', pd.NaT).strftime('%d/%m/%Y') if pd.notna(comunicacao_info.get('Data_da_operacao')) else 'N/A')
-            with col2_comm:
-                st.metric("Comunicante", comunicacao_info.get('nomeComunicante', 'N/A'))
-                st.metric("Cidade/UF Agência", f"{comunicacao_info.get('CidadeAgencia', 'N/A')} / {comunicacao_info.get('UFAgencia', 'N/A')}")
-            with col3_comm:
-                st.metric("Segmento", comunicacao_info.get('CodigoSegmento', 'N/A'))
-                # Buscar descrição do segmento
-                desc_campos = df_segmento_desc[df_segmento_desc['CodigoSegmento'] == str(comunicacao_info.get('CodigoSegmento', ''))]
-                if not desc_campos.empty:
-                    #st.caption(f"Descrição Campos: {desc_campos['DescricaoCampos'].iloc[0]}")
-                    st.info(f"Descrição Campos do Segmento: {desc_campos['DescricaoCampos'].iloc[0]}")
-                else:
-                    st.caption("Descrição Campos: Segmento não mapeado")
+    if not titulares_df.empty:
+        for _, tit in titulares_df.iterrows():
+            # Validação rigorosa: Apenas se for Booleano True
+            pep_tag = ' <span style="background-color: #FF6B6B; color: #FFF; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">PEP</span>' if tit.get('bitPepCitado') == True else ""
+            srv_tag = ' <span style="background-color: #FFD700; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">SERVIDOR</span>' if tit.get('intServidorCitado') == True else ""
+            
+            st.markdown(f"""
+            <div style="background-color: #222226; border: 1px solid #4C4E54; border-radius: 7px; padding: 15px; margin-bottom: 10px;">
+                <div style="font-size: 1.2em; font-weight: bold; color: #FAFAFA;">{tit['nomeEnvolvido']} {pep_tag} {srv_tag}</div>
+                <div style="color: #ADADAD; font-family: monospace;">{tit['cpfCnpjEnvolvido']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Nenhum titular identificado.")
 
-                st.divider()
+    # 4. Valores Reportados (5 Colunas)
+    st.subheader("💰 Valores Reportados")
+    v_cols = st.columns(5)
+    for i, c in enumerate(['A', 'B', 'C', 'D', 'E']):
+        val = comunicacao_info.get(f'ValorCampo{c}', 0.0)
+        v_cols[i].metric(f"Campo {c}", f"R$ {val:,.2f}" if pd.notna(val) else "R$ 0,00")
 
-                # --- NOVO: Exibir Titular(es) da Comunicação (com DESTAQUE) ---
-                st.subheader("👤 Titular(es) da Comunicação")
-                if not envolvidos_detalhe.empty:
-                    # Filtrar pelos papéis de titular
-                    titulares_df = envolvidos_detalhe[
-                        envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])
-                    ]
+    st.divider()
 
-                    if not titulares_df.empty:
-                        # Exibir cada titular encontrado
-                        for _, titular_row in titulares_df.iterrows():
-                            nome_titular = titular_row.get('nomeEnvolvido', 'N/A')
-                            cpf_titular = titular_row.get('cpfCnpjEnvolvido', 'N/A')
-
-                            # Formatar tags de PEP e Servidor com estilo
-                            pep_info = ""
-                            servidor_info = ""
-                            if str(titular_row.get('bitPepCitado', 'Não')).lower() == 'sim':
-                                # Estilo para a tag PEP (fundo vermelho, texto branco)
-                                pep_info = ' <span style="background-color: #FF6B6B; color: #FFF; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">PEP</span>'
-                        if str(titular_row.get('intServidorCitado', 'Não')).lower() == 'sim':
-                            # Estilo para a tag Servidor (fundo amarelo, texto escuro)
-                            servidor_info = ' <span style="background-color: #FFD700; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">SERVIDOR</span>'
-
-                            # --- MODIFICADO: Bloco HTML para destaque ---
-                            # Usamos um <div> com estilo para criar a caixa.
-                            # Ajuste as cores (background-color, border, color) para o seu tema.
-                            # Estas cores são otimizadas para o tema escuro das suas screenshots.
-                            st.markdown(f"""
-                            <div style="background-color: #222226; border: 1px solid #4C4E54; border-radius: 7px; padding: 12px; margin-bottom: 10px;">
-                                <div style="font-size: 1.25em; font-weight: bold; color: #FAFAFA; margin-bottom: 5px;">
-                                    {nome_titular} {pep_info} {servidor_info}
-                                </div>
-                                <div style="font-size: 1.1em; color: #ADADAD; font-family: monospace;">
-                                    {cpf_titular}
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            # --- FIM MODIFICAÇÃO ---
-                        else:
-                            st.info("Nenhum envolvido com papel 'Titular' ou 'Titular da Conta' encontrado para este Indexador.")
-                    else:
-                        st.info("Nenhum envolvido encontrado para este Indexador.")
-                    # --- FIM NOVO ---
-
-                    st.divider()
-
-                    # Exibir Valores (Campos A-E) em destaque
-                    st.subheader("Valores Reportados")
-                    val_cols = st.columns(5)
-                    campos = ['A', 'B', 'C', 'D', 'E']
-                    for i, campo in enumerate(campos):
-                        valor_col_name = f'ValorCampo{campo}'
-                        if valor_col_name in comunicacao_info and pd.notna(comunicacao_info[valor_col_name]):
-                            with val_cols[i]:
-                                st.metric(f"Valor Campo {campo}", f"R$ {comunicacao_info[valor_col_name]:,.2f}")
-                        else:
-                             with val_cols[i]:
-                                st.metric(f"Valor Campo {campo}", "R$ 0,00") # Ou N/A
-
-                    st.divider()
-
-                    # Exibir Informações Adicionais
-                    st.subheader("Informações Adicionais")
-                    st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
-
-                    info_adicional = comunicacao_info.get('informacoesAdicionais', 'Nenhuma informação adicional disponível.')
-                    if pd.isna(info_adicional) or info_adicional.strip() == '':
-                         info_adicional = 'Nenhuma informação adicional disponível.'
-                    # Usar text_area para textos longos, definir altura
-                    st.markdown(f"""
-                    <div style="height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 10px; border-radius: 5px; background-color: #f9f9f9; color: #333;">
-                        {info_adicional.replace('<','&lt;').replace('>','&gt;')}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    # st.code(info_adicional, language=None) # language=None evita highlight # Mostra o conteúdo em uma única linha permitindo cópia.
-                    # st.text_area("Detalhes:", value=info_adicional, height=300, disabled=True, key=f"info_{selected_indexador}") # Mostra o conteúdo bloqueado.
-
-                    # --- NOVO: Nuvem de Palavras e Keywords ---
-                    st.divider()
-                    st.subheader("Nuvem de Palavras e Termos Financeiros Frequentes")
-                    with st.spinner("Gerando nuvem de palavras e analisando termos..."):
-                         wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(info_adicional)
-
-                    if wordcloud_img:
-                        st.image(wordcloud_img, caption="Nuvem das palavras mais frequentes (após remoção de stopwords)")
-                    else:
-                        st.caption("Não foi possível gerar a nuvem de palavras.")
-
-                    if df_fin_keywords is not None and not df_fin_keywords.empty:
-                        st.markdown("##### Top Termos Financeiros:")
-                        st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
-
-                        st.markdown("##### Contexto dos Termos:")
-                        if context_map:
-                            for keyword, snippets in context_map.items():
-                                with st.expander(f"Contexto para '{keyword}' ({len(snippets)} trechos)"):
-                                    for i, snippet in enumerate(snippets):
-                                        #st.markdown(f"_{i+1}_: ...{snippet}...") # Usar markdown para itálico
-                                        st.text_area(
-                                        label=f"Trecho {i+1}", # Rótulo para a caixa de texto
-                                        value=snippet,
-                                        height=100, # Ajuste a altura conforme necessário
-                                        key=f"context_{selected_indexador}_{keyword}_{i}" # Chave única
-                                        )
-                                        if i < len(snippets) - 1: st.markdown("---") # Divisor
-                        else:
-                            st.caption("Não foi possível encontrar contexto para os termos financeiros.")
-                    elif wordcloud_img: # Se a nuvem foi gerada mas keywords não
-                         st.caption("Nenhum termo financeiro relevante encontrado entre as palavras mais frequentes.")
-                    # --- FIM NOVO ---
-
-                    st.divider()
-
-                    # Exibir Ocorrências Vinculadas
-                    st.subheader("Ocorrências Vinculadas")
-                    if not ocorrencias_detalhe.empty:
-                        st.dataframe(ocorrencias_detalhe[['idOcorrencia', 'Ocorrencia']], width='stretch', hide_index=True)
-                    else:
-                        st.info("Nenhuma ocorrência vinculada encontrada para este Indexador.")
-
-                    st.divider()
-
-                    # Exibir Envolvidos Vinculados
-                    st.subheader("Envolvidos Vinculados")
-                    if not envolvidos_detalhe.empty:
-                        # Selecionar e formatar colunas para exibição
-                        cols_envolvidos = ['cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido',
-                                           'bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado',
-                                           'agenciaEnvolvido', 'contaEnvolvido']
-                        cols_envolvidos_exist = [c for c in cols_envolvidos if c in envolvidos_detalhe.columns]
-
-                        # Criar cópia para formatação
-                        envolvidos_display = envolvidos_detalhe[cols_envolvidos_exist].copy()
-
-                        # Formatar booleanos
-                        for flag in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
-                             if flag in envolvidos_display.columns:
-                                 envolvidos_display[flag] = envolvidos_display[flag].apply(lambda x: "Sim" if str(x).lower()=='sim' or x==True else "Não")
-
-                        st.dataframe(envolvidos_display, width='stretch', hide_index=True,
-                                     column_config={
-                                         "cpfCnpjEnvolvido": "CPF/CNPJ",
-                                         "nomeEnvolvido": "Nome",
-                                         "tipoEnvolvido": "Papel",
-                                         "bitPepCitado": "PEP",
-                                         "bitPessoaObrigadaCitado": "P. Obrigada",
-                                         "intServidorCitado": "Servidor P.",
-                                         "agenciaEnvolvido": "Agência Env.",
-                                         "contaEnvolvido": "Conta Env."
-                                     })
-                    else:
-                        st.info("Nenhum envolvido vinculado encontrado para este Indexador.")
-
-
-                    # --- NOVO: Visualização do Grafo da Comunicação ---
-                    st.divider()
-                    st.subheader("Visualização dos Vínculos na Comunicação")
-                    if not envolvidos_detalhe.empty:
-                        with st.spinner("Gerando grafo da comunicação..."):
-                            G_comm, titulares_comm = create_communication_graph(envolvidos_detalhe)
-
-                        if G_comm.number_of_nodes() > 0:
-
-                            # Visualizar o grafo
-                            with st.spinner("Renderizando visualização do grafo..."):
-                                comm_graph_file = visualize_communication_graph(G_comm, titulares_comm)
-
-                            if comm_graph_file:
-                                st.components.v1.html(open(comm_graph_file, 'r', encoding='utf-8').read(), height=550)
-                                st.html(generate_network_legend())
-                            else:
-                                st.warning("Não foi possível renderizar o grafo da comunicação.")
-                        else:
-                            st.info("Não há envolvidos suficientes ou válidos para gerar um grafo para esta comunicação.")
-                    else:
-                        st.info("Não há envolvidos vinculados para gerar o grafo.")
-
-
-                    # --- MODIFICADO: Tabelas e Gráficos de Fluxo Baseados em Informações Adicionais ---
-                    st.divider()
-                    st.subheader("Resumo do Fluxo (Extraído de Informações Adicionais)")
-                    st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
-
-                    if pd.notna(info_adicional) and info_adicional != 'Nenhuma informação adicional disponível.':
-                        with st.spinner("Analisando texto de informações adicionais..."):
-                            # Chamar a nova função que retorna 3 DataFrames
-                            df_creditos_ext, df_debitos_ext, df_cartao_ext = extract_all_financial_data(info_adicional)
-
-                            # --- NOVO: Diagrama de Sankey ---
-                            st.markdown("##### 🌊 Diagrama de Fluxo (Sankey)")
-
-                            # Determinar o nome do titular para o centro do gráfico
-                            nome_titular_sankey = "Titular/Conta"
-                            # Tentar pegar o nome do titular identificado anteriormente na aba
-                            if not envolvidos_detalhe.empty:
-                                 tits = envolvidos_detalhe[envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])]
-                                 if not tits.empty:
-                                     nome_titular_sankey = tits.iloc[0]['nomeEnvolvido']
-
-                            if not df_creditos_ext.empty or not df_debitos_ext.empty:
-                                fig_sankey = plot_sankey_fluxo(df_creditos_ext, df_debitos_ext, nome_titular_sankey)
-                                if fig_sankey:
-                                    st.plotly_chart(fig_sankey, use_container_width=True)
-                                else:
-                                    st.caption("Dados insuficientes para gerar o diagrama de fluxo.")
-                            # --- FIM NOVO ---
-                        # --- FIM MODIFICAÇÃO ---
-
-                        st.markdown("##### Principais Origens de Crédito")
-                        if not df_creditos_ext.empty:
-                            # Ordenar por valor para exibição
-                            df_creditos_ext = df_creditos_ext.sort_values('Valor (R$)', ascending=False)
-                            st.dataframe(df_creditos_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                            # Remover 'Detalhe' se não estiver mais presente
-                                         })
-                            fig_cred = px.bar(df_creditos_ext.head(10), y='Origem do Crédito', x='Valor (R$)',
-                                              orientation='h', title='Top 10 Origens de Crédito',
-                                              labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
-                                              text='Valor (R$)', height=400)
-                            fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                            fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_cred, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair origens de crédito.") # Já tratado na função
-
-                        st.markdown("##### Principais Destinos de Débito")
-                        if not df_debitos_ext.empty:
-                            # Ordenar por valor para exibição
-                            df_debitos_ext = df_debitos_ext.sort_values('Valor (R$)', ascending=False)
-                            st.dataframe(df_debitos_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                            # Remover 'Detalhe' se não estiver mais presente
-                                         })
-                            fig_deb = px.bar(df_debitos_ext.head(10), y='Destino do Débito', x='Valor (R$)',
-                                             orientation='h', title='Top 10 Destinos de Débito',
-                                             labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
-                                             text='Valor (R$)', height=400)
-                            fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                            fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_deb, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair destinos de débito.") # Já tratado na função
-
-                        st.markdown("##### Principais Gastos no Cartão")
-                        if not df_cartao_ext.empty:
-                             # Ordenar por valor para exibição
-                             df_cartao_ext = df_cartao_ext.sort_values('Valor (R$)', ascending=False)
-                             st.dataframe(df_cartao_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                         })
-                             fig_card = px.bar(df_cartao_ext.head(10), y='Estabelecimento', x='Valor (R$)',
-                                               orientation='h', title='Top 10 Gastos no Cartão de Crédito',
-                                               labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
-                                               text='Valor (R$)', height=400)
-                             fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                             fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
-                             st.plotly_chart(fig_card, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair gastos no cartão.") # Já tratado na função
-
-                    else:
-                        st.info("Campo 'Informações Adicionais' vazio ou indisponível para gerar gráficos de fluxo.")
-                    # --- FIM MODIFICAÇÃO Bloco Gráficos ---
-
-                else:
-                    st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
-            #else:
-            #    st.info("Selecione um Indexador na lista acima para ver os detalhes.")
+    # 5. Ocorrências e Envolvidos (Tabelas)
+    st.subheader("🚩 Ocorrências")
+    ocor_tab = comunicacao_detalhe[['idOcorrencia', 'Ocorrencia']].drop_duplicates()
+    st.dataframe(ocor_tab, hide_index=True, use_container_width=True)
     
+    st.subheader("👥 Envolvidos Vinculados")
+    if not envolvidos_raw.empty:
+        env_disp = envolvidos_raw.copy()
+        # Formatação para Sim/Não
+        for col in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
+            if col in env_disp.columns:
+                env_disp[col] = env_disp[col].apply(lambda x: "Sim" if str(x).lower() == 'sim' or x == True else "Não")
+            
+    st.dataframe(env_disp[['cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido', 'bitPepCitado', 'intServidorCitado','agenciaEnvolvido', 'contaEnvolvido']], 
+    column_config={
+    "cpfCnpjEnvolvido": "CPF/CNPJ", 
+    "nomeEnvolvido": "Nome", 
+    "tipoEnvolvido": "Papel", 
+    "bitPepCitado": "PEP", 
+    "intServidorCitado": "Servidor",
+    "agenciaEnvolvido": "Agência Env.",
+    "contaEnvolvido": "Conta Env."},
+    hide_index=True, use_container_width=True)    
+        
+    # 6. Grafo de Vínculos da Comunicação (RESTAURADO)
+    st.subheader("🕸️ Visualização dos Vínculos na Comunicação")
+    with st.spinner("Gerando grafo de rede..."):
+        G_comm, tits_comm = create_communication_graph(envolvidos_raw)
+        if G_comm.number_of_nodes() > 0:
+            comm_file = visualize_communication_graph(G_comm, tits_comm)
+            if comm_file:
+                st.components.v1.html(open(comm_file, 'r', encoding='utf-8').read(), height=500)
+                st.html(generate_network_legend())
 
+    st.divider()
+
+    # 7. Narrativa e Fluxo Financeiro (Sankey)
+
+    st.subheader("📝 Informações Adicionais")
+    st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
+    narrativa = comunicacao_info.get('informacoesAdicionais', '')
+    
+    if pd.notna(narrativa) and narrativa.strip() != '':
+        # Exibição do texto original
+        st.markdown(f"""<div style="height: 250px; overflow-y: auto; border: 1px solid #4C4E54; padding: 10px; border-radius: 5px; background-color: #1E1E1E; color: #EEE; margin-bottom: 20px;">{narrativa}</div>""", unsafe_allow_html=True)
+        
+        # Processamento de Nuvem e Termos
+        st.subheader("📝 Análise de Termos da Narrativa")
+        with st.spinner("Analisando narrativa..."):
+            wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(narrativa)
+            
+            if wordcloud_img:
+                st.image(wordcloud_img, caption="Termos mais frequentes na narrativa")
+            
+            if df_fin_keywords is not None and not df_fin_keywords.empty:
+                st.markdown("##### Top Termos Financeiros:")
+                st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
+                
+                st.markdown("##### Contexto dos Termos:")
+                for keyword, snippets in context_map.items():
+                    with st.expander(f"Contexto para '{keyword}'"):
+                        for i, snip in enumerate(snippets):
+                            st.text_area(label=f"Ocorrência {i+1}", value=snip, height=80, key=f"{key_prefix}_ctx_{selected_indexador}_{keyword}_{i}")
+
+            # 6. Fluxo Financeiro (Sankey e Barras)
+            st.divider()
+            st.subheader("🌊 Resumo do Fluxo (Extraído do Texto)")
+            st.info("""
+                ⚠️ **IMPORTANTE:** É possível que esses dados estejam incompletos.  
+                Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.
+                """)
+            #st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. \n\n  Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
+            df_cred, df_deb, df_cartao = extract_all_financial_data(narrativa)
+            
+            # Sankey
+            if not df_cred.empty or not df_deb.empty:
+                # Tenta pegar o nome do primeiro titular para o centro do gráfico
+                nome_alvo = titulares_df['nomeEnvolvido'].iloc[0] if not titulares_df.empty else "Titular"
+                fig_s = plot_sankey_fluxo(df_cred, df_deb, nome_alvo)
+                if fig_s:
+                    st.plotly_chart(fig_s, use_container_width=True, key=f"{key_prefix}_sankey_main_{selected_indexador}")
+
+            # Gráficos de Barras
+                
+            st.markdown("##### Principais Origens de Crédito")
+            if not df_cred.empty:
+                # Ordenar por valor para exibição
+                df_cred = df_cred.sort_values('Valor (R$)', ascending=False)
+                st.dataframe(df_cred, width='stretch', hide_index=True,
+                column_config={
+                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                })
+                fig_cred = px.bar(df_cred.head(10), y='Origem do Crédito', x='Valor (R$)',
+                orientation='h', title='Top 10 Origens de Crédito',
+                labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
+                text='Valor (R$)', height=400)
+                fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_cred, use_container_width=True, key=f"{key_prefix}_creditos_{selected_indexador}")                
+
+            st.markdown("##### Principais Destinos de Débito")
+            if not df_deb.empty:
+                # Ordenar por valor para exibição
+                df_deb = df_deb.sort_values('Valor (R$)', ascending=False)
+                st.dataframe(df_deb, width='stretch', hide_index=True,
+                column_config={
+                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                })
+                fig_deb = px.bar(df_deb.head(10), y='Destino do Débito', x='Valor (R$)',
+                orientation='h', title='Top 10 Destinos de Débito',
+                labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
+                text='Valor (R$)', height=400)
+                fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_deb, use_container_width=True, key=f"{key_prefix}_debitos_{selected_indexador}")
+
+            st.markdown("##### Principais Gastos no Cartão")
+            if not df_cartao.empty:
+                # Ordenar por valor para exibição
+                df_cartao = df_cartao.sort_values('Valor (R$)', ascending=False)
+                st.dataframe(df_cartao, width='stretch', hide_index=True,
+                column_config={
+                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
+                })
+                fig_card = px.bar(df_cartao.head(10), y='Estabelecimento', x='Valor (R$)',
+                orientation='h', title='Top 10 Gastos no Cartão de Crédito',
+                labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
+                text='Valor (R$)', height=400)
+                fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
+                fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_card, use_container_width=True, key=f"{key_prefix}_cartao_{selected_indexador}")
+
+
+                
+    else:
+        st.info("Nenhuma narrativa disponível para análise nesta comunicação.")
+
+        
 # ==============================================
 # INTERFACE PRINCIPAL
 # ==============================================
@@ -2625,7 +2490,7 @@ if st.session_state.data_loaded:
                         markers=True
                     )
                     fig.update_traces(textposition='top center')
-                    st.plotly_chart(fig, use_container_width=True, key="evolucao_temporal_geral")
+                    st.plotly_chart(fig, use_container_width=True, key="plot_evolucao_mensal_geral")
                 else:
                     st.info("Nenhum dado com data válida para gerar a evolução temporal.")
 
@@ -2943,7 +2808,7 @@ if st.session_state.data_loaded:
             fig_benford = analise_benford(df_benford_input)  
             
             if fig_benford is not None:
-                st.plotly_chart(fig_benford, use_container_width=True, key="benford_plot_geral_corrigido")
+                st.plotly_chart(fig_benford, use_container_width=True, key="plot_benford_geral")
             else:
                 st.caption("Não há valores positivos suficientes em 'ValorTotal' para aplicar Benford.")
                 
@@ -3323,7 +3188,7 @@ if st.session_state.data_loaded:
                 st.subheader("🌊 Diagrama de Fluxo (Sankey Estruturado)")
                 st.caption("Baseado nos papéis (Remetente/Beneficiário) registrados nas comunicações.")
                 
-                # Controles com chave única para esta aba (prefixo ind_)
+                # --- Diagrama de Fluxo (Aba Individual) ---
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
                     v_min_ind = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"ind_vmin_{selected_cpf_individual}")
@@ -3331,10 +3196,9 @@ if st.session_state.data_loaded:
                     n_links_ind = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"ind_nlinks_{selected_cpf_individual}")
                 
                 with st.spinner("Gerando diagrama de fluxo..."):
-                    fig_sankey_ind_detalhada = plot_sankey_envolvido_estruturado(df_display, selected_cpf_individual, nome, min_value=v_min_ind, top_n=n_links_ind)
-                    
-                    if fig_sankey_ind_detalhada:
-                        st.plotly_chart(fig_sankey_ind_detalhada, use_container_width=True, key=f"sankey_ind_plot_{selected_cpf_individual}")
+                    fig_sankey_ind = plot_sankey_envolvido_estruturado(df_display, selected_cpf_individual, nome, min_value=v_min_ind, top_n=n_links_ind)
+                    if fig_sankey_ind:
+                        st.plotly_chart(fig_sankey_ind, use_container_width=True, key=f"plot_sankey_ind_{selected_cpf_individual}")
                     else:
                         st.info("Não há dados de contrapartes registrados como remetentes ou beneficiários para este envolvido nos RIFs filtrados.")
                 
@@ -3401,307 +3265,8 @@ if st.session_state.data_loaded:
                 st.session_state.trigger_jump = False
 
             if selected_indexador != "Selecione...":
-                st.subheader(f"Detalhes da Comunicação Indexador: {selected_indexador}")
-
-                # Filtrar dados para o Indexador selecionado
-                comunicacao_detalhe = st.session_state.df_comunicacoes[st.session_state.df_comunicacoes['Indexador'] == selected_indexador]
-                envolvidos_detalhe = st.session_state.df_envolvidos[st.session_state.df_envolvidos['Indexador'].astype(str).str.strip() == str(selected_indexador).strip()]
-                ocorrencias_detalhe = st.session_state.df_ocorrencias[st.session_state.df_ocorrencias['Indexador'] == selected_indexador]
-
-                if not comunicacao_detalhe.empty:
-                    comunicacao_info = comunicacao_detalhe.iloc[0] # Pega a primeira (e única) linha
-
-                    # Exibir Informações Gerais da Comunicação
-                    col1_comm, col2_comm, col3_comm = st.columns(3)
-                    with col1_comm:
-                        st.metric("ID Comunicação", comunicacao_info.get('idComunicacao', 'N/A'))
-                        st.metric("Data Operação", comunicacao_info.get('Data_da_operacao', pd.NaT).strftime('%d/%m/%Y') if pd.notna(comunicacao_info.get('Data_da_operacao')) else 'N/A')
-                    with col2_comm:
-                        st.metric("Comunicante", comunicacao_info.get('nomeComunicante', 'N/A'))
-                        st.metric("Cidade/UF Agência", f"{comunicacao_info.get('CidadeAgencia', 'N/A')} / {comunicacao_info.get('UFAgencia', 'N/A')}")
-                    with col3_comm:
-                        st.metric("Segmento", comunicacao_info.get('CodigoSegmento', 'N/A'))
-                        # Buscar descrição do segmento
-                        desc_campos = df_segmento_desc[df_segmento_desc['CodigoSegmento'] == str(comunicacao_info.get('CodigoSegmento', ''))]
-                        if not desc_campos.empty:
-                            #st.caption(f"Descrição Campos: {desc_campos['DescricaoCampos'].iloc[0]}")
-                            st.info(f"Descrição Campos do Segmento: {desc_campos['DescricaoCampos'].iloc[0]}")
-                        else:
-                            st.caption("Descrição Campos: Segmento não mapeado")
-
-                    st.divider()
-
-                    # --- NOVO: Exibir Titular(es) da Comunicação (com DESTAQUE) ---
-                    st.subheader("👤 Titular(es) da Comunicação")
-                    if not envolvidos_detalhe.empty:
-                        # Filtrar pelos papéis de titular
-                        titulares_df = envolvidos_detalhe[
-                            envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])
-                        ]
-
-                        if not titulares_df.empty:
-                            # Exibir cada titular encontrado
-                            for _, titular_row in titulares_df.iterrows():
-                                nome_titular = titular_row.get('nomeEnvolvido', 'N/A')
-                                cpf_titular = titular_row.get('cpfCnpjEnvolvido', 'N/A')
-
-                                # Formatar tags de PEP e Servidor com estilo
-                                pep_info = ""
-                                servidor_info = ""
-                                if str(titular_row.get('bitPepCitado', 'Não')).lower() == 'sim':
-                                    # Estilo para a tag PEP (fundo vermelho, texto branco)
-                                    pep_info = ' <span style="background-color: #FF6B6B; color: #FFF; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">PEP</span>'
-                                if str(titular_row.get('intServidorCitado', 'Não')).lower() == 'sim':
-                                    # Estilo para a tag Servidor (fundo amarelo, texto escuro)
-                                    servidor_info = ' <span style="background-color: #FFD700; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">SERVIDOR</span>'
-
-                                # --- MODIFICADO: Bloco HTML para destaque ---
-                                # Usamos um <div> com estilo para criar a caixa.
-                                # Ajuste as cores (background-color, border, color) para o seu tema.
-                                # Estas cores são otimizadas para o tema escuro das suas screenshots.
-                                st.markdown(f"""
-                                <div style="background-color: #222226; border: 1px solid #4C4E54; border-radius: 7px; padding: 12px; margin-bottom: 10px;">
-                                    <div style="font-size: 1.25em; font-weight: bold; color: #FAFAFA; margin-bottom: 5px;">
-                                        {nome_titular} {pep_info} {servidor_info}
-                                    </div>
-                                    <div style="font-size: 1.1em; color: #ADADAD; font-family: monospace;">
-                                        {cpf_titular}
-                                    </div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                # --- FIM MODIFICAÇÃO ---
-                        else:
-                            st.info("Nenhum envolvido com papel 'Titular' ou 'Titular da Conta' encontrado para este Indexador.")
-                    else:
-                        st.info("Nenhum envolvido encontrado para este Indexador.")
-                    # --- FIM NOVO ---
-
-                    st.divider()
-
-                    # Exibir Valores (Campos A-E) em destaque
-                    st.subheader("Valores Reportados")
-                    val_cols = st.columns(5)
-                    campos = ['A', 'B', 'C', 'D', 'E']
-                    for i, campo in enumerate(campos):
-                        valor_col_name = f'ValorCampo{campo}'
-                        if valor_col_name in comunicacao_info and pd.notna(comunicacao_info[valor_col_name]):
-                            with val_cols[i]:
-                                st.metric(f"Valor Campo {campo}", f"R$ {comunicacao_info[valor_col_name]:,.2f}")
-                        else:
-                             with val_cols[i]:
-                                st.metric(f"Valor Campo {campo}", "R$ 0,00") # Ou N/A
-
-                    st.divider()
-
-                    # Exibir Informações Adicionais
-                    st.subheader("Informações Adicionais")
-                    st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
-
-                    info_adicional = comunicacao_info.get('informacoesAdicionais', 'Nenhuma informação adicional disponível.')
-                    if pd.isna(info_adicional) or info_adicional.strip() == '':
-                         info_adicional = 'Nenhuma informação adicional disponível.'
-                    # Usar text_area para textos longos, definir altura
-                    st.markdown(f"""
-                    <div style="height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 10px; border-radius: 5px; background-color: #f9f9f9; color: #333;">
-                        {info_adicional.replace('<','&lt;').replace('>','&gt;')}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    # st.code(info_adicional, language=None) # language=None evita highlight # Mostra o conteúdo em uma única linha permitindo cópia.
-                    # st.text_area("Detalhes:", value=info_adicional, height=300, disabled=True, key=f"info_{selected_indexador}") # Mostra o conteúdo bloqueado.
-
-                    # --- NOVO: Nuvem de Palavras e Keywords ---
-                    st.divider()
-                    st.subheader("Nuvem de Palavras e Termos Financeiros Frequentes")
-                    with st.spinner("Gerando nuvem de palavras e analisando termos..."):
-                         wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(info_adicional)
-
-                    if wordcloud_img:
-                        st.image(wordcloud_img, caption="Nuvem das palavras mais frequentes (após remoção de stopwords)")
-                    else:
-                        st.caption("Não foi possível gerar a nuvem de palavras.")
-
-                    if df_fin_keywords is not None and not df_fin_keywords.empty:
-                        st.markdown("##### Top Termos Financeiros:")
-                        st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
-
-                        st.markdown("##### Contexto dos Termos:")
-                        if context_map:
-                            for keyword, snippets in context_map.items():
-                                with st.expander(f"Contexto para '{keyword}' ({len(snippets)} trechos)"):
-                                    for i, snippet in enumerate(snippets):
-                                        #st.markdown(f"_{i+1}_: ...{snippet}...") # Usar markdown para itálico
-                                        st.text_area(
-                                        label=f"Trecho {i+1}", # Rótulo para a caixa de texto
-                                        value=snippet,
-                                        height=100, # Ajuste a altura conforme necessário
-                                        key=f"context_{selected_indexador}_{keyword}_{i}" # Chave única
-                                        )
-                                        if i < len(snippets) - 1: st.markdown("---") # Divisor
-                        else:
-                            st.caption("Não foi possível encontrar contexto para os termos financeiros.")
-                    elif wordcloud_img: # Se a nuvem foi gerada mas keywords não
-                         st.caption("Nenhum termo financeiro relevante encontrado entre as palavras mais frequentes.")
-                    # --- FIM NOVO ---
-
-                    st.divider()
-
-                    # Exibir Ocorrências Vinculadas
-                    st.subheader("Ocorrências Vinculadas")
-                    if not ocorrencias_detalhe.empty:
-                        st.dataframe(ocorrencias_detalhe[['idOcorrencia', 'Ocorrencia']], width='stretch', hide_index=True)
-                    else:
-                        st.info("Nenhuma ocorrência vinculada encontrada para este Indexador.")
-
-                    st.divider()
-
-                    # Exibir Envolvidos Vinculados
-                    st.subheader("Envolvidos Vinculados")
-                    if not envolvidos_detalhe.empty:
-                        # Selecionar e formatar colunas para exibição
-                        cols_envolvidos = ['cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido',
-                                           'bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado',
-                                           'agenciaEnvolvido', 'contaEnvolvido']
-                        cols_envolvidos_exist = [c for c in cols_envolvidos if c in envolvidos_detalhe.columns]
-
-                        # Criar cópia para formatação
-                        envolvidos_display = envolvidos_detalhe[cols_envolvidos_exist].copy()
-
-                        # Formatar booleanos
-                        for flag in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
-                             if flag in envolvidos_display.columns:
-                                 envolvidos_display[flag] = envolvidos_display[flag].apply(lambda x: "Sim" if str(x).lower()=='sim' or x==True else "Não")
-
-                        st.dataframe(envolvidos_display, width='stretch', hide_index=True,
-                                     column_config={
-                                         "cpfCnpjEnvolvido": "CPF/CNPJ",
-                                         "nomeEnvolvido": "Nome",
-                                         "tipoEnvolvido": "Papel",
-                                         "bitPepCitado": "PEP",
-                                         "bitPessoaObrigadaCitado": "P. Obrigada",
-                                         "intServidorCitado": "Servidor P.",
-                                         "agenciaEnvolvido": "Agência Env.",
-                                         "contaEnvolvido": "Conta Env."
-                                     })
-                    else:
-                        st.info("Nenhum envolvido vinculado encontrado para este Indexador.")
-
-
-                    # --- NOVO: Visualização do Grafo da Comunicação ---
-                    st.divider()
-                    st.subheader("Visualização dos Vínculos na Comunicação")
-                    if not envolvidos_detalhe.empty:
-                        with st.spinner("Gerando grafo da comunicação..."):
-                            G_comm, titulares_comm = create_communication_graph(envolvidos_detalhe)
-
-                        if G_comm.number_of_nodes() > 0:
-
-                            # Visualizar o grafo
-                            with st.spinner("Renderizando visualização do grafo..."):
-                                comm_graph_file = visualize_communication_graph(G_comm, titulares_comm)
-
-                            if comm_graph_file:
-                                st.components.v1.html(open(comm_graph_file, 'r', encoding='utf-8').read(), height=550)
-                                st.html(generate_network_legend())
-                            else:
-                                st.warning("Não foi possível renderizar o grafo da comunicação.")
-                        else:
-                            st.info("Não há envolvidos suficientes ou válidos para gerar um grafo para esta comunicação.")
-                    else:
-                        st.info("Não há envolvidos vinculados para gerar o grafo.")
-
-
-                    # --- MODIFICADO: Tabelas e Gráficos de Fluxo Baseados em Informações Adicionais ---
-                    st.divider()
-                    st.subheader("Resumo do Fluxo (Extraído de Informações Adicionais)")
-                    st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
-
-                    if pd.notna(info_adicional) and info_adicional != 'Nenhuma informação adicional disponível.':
-                        with st.spinner("Analisando texto de informações adicionais..."):
-                            # Chamar a nova função que retorna 3 DataFrames
-                            df_creditos_ext, df_debitos_ext, df_cartao_ext = extract_all_financial_data(info_adicional)
-
-                            # --- NOVO: Diagrama de Sankey ---
-                            st.markdown("##### 🌊 Diagrama de Fluxo (Sankey)")
-
-                            # Determinar o nome do titular para o centro do gráfico
-                            nome_titular_sankey = "Titular/Conta"
-                            # Tentar pegar o nome do titular identificado anteriormente na aba
-                            if not envolvidos_detalhe.empty:
-                                 tits = envolvidos_detalhe[envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])]
-                                 if not tits.empty:
-                                     nome_titular_sankey = tits.iloc[0]['nomeEnvolvido']
-
-                            if not df_creditos_ext.empty or not df_debitos_ext.empty:
-                                fig_sankey = plot_sankey_fluxo(df_creditos_ext, df_debitos_ext, nome_titular_sankey)
-                                if fig_sankey:
-                                    st.plotly_chart(fig_sankey, use_container_width=True)
-                                else:
-                                    st.caption("Dados insuficientes para gerar o diagrama de fluxo.")
-                            # --- FIM NOVO ---
-                        # --- FIM MODIFICAÇÃO ---
-
-                        st.markdown("##### Principais Origens de Crédito")
-                        if not df_creditos_ext.empty:
-                            # Ordenar por valor para exibição
-                            df_creditos_ext = df_creditos_ext.sort_values('Valor (R$)', ascending=False)
-                            st.dataframe(df_creditos_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                            # Remover 'Detalhe' se não estiver mais presente
-                                         })
-                            fig_cred = px.bar(df_creditos_ext.head(10), y='Origem do Crédito', x='Valor (R$)',
-                                              orientation='h', title='Top 10 Origens de Crédito',
-                                              labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
-                                              text='Valor (R$)', height=400)
-                            fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                            fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_cred, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair origens de crédito.") # Já tratado na função
-
-                        st.markdown("##### Principais Destinos de Débito")
-                        if not df_debitos_ext.empty:
-                            # Ordenar por valor para exibição
-                            df_debitos_ext = df_debitos_ext.sort_values('Valor (R$)', ascending=False)
-                            st.dataframe(df_debitos_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                            # Remover 'Detalhe' se não estiver mais presente
-                                         })
-                            fig_deb = px.bar(df_debitos_ext.head(10), y='Destino do Débito', x='Valor (R$)',
-                                             orientation='h', title='Top 10 Destinos de Débito',
-                                             labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
-                                             text='Valor (R$)', height=400)
-                            fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                            fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_deb, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair destinos de débito.") # Já tratado na função
-
-                        st.markdown("##### Principais Gastos no Cartão")
-                        if not df_cartao_ext.empty:
-                             # Ordenar por valor para exibição
-                             df_cartao_ext = df_cartao_ext.sort_values('Valor (R$)', ascending=False)
-                             st.dataframe(df_cartao_ext, width='stretch', hide_index=True,
-                                         column_config={
-                                            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                            "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                         })
-                             fig_card = px.bar(df_cartao_ext.head(10), y='Estabelecimento', x='Valor (R$)',
-                                               orientation='h', title='Top 10 Gastos no Cartão de Crédito',
-                                               labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
-                                               text='Valor (R$)', height=400)
-                             fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                             fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
-                             st.plotly_chart(fig_card, use_container_width=True)
-                        # else: st.caption("Não foi possível extrair gastos no cartão.") # Já tratado na função
-
-                    else:
-                        st.info("Campo 'Informações Adicionais' vazio ou indisponível para gerar gráficos de fluxo.")
-                    # --- FIM MODIFICAÇÃO Bloco Gráficos ---
-
-                else:
-                    st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
+                # Chama a função mestre com prefixo exclusivo para esta aba
+                render_analise_comunicacao(selected_indexador, key_prefix="aba_comunicacao")
             else:
                  st.info("Selecione um Indexador na lista acima para ver os detalhes.")
 
@@ -3833,18 +3398,17 @@ if st.session_state.data_loaded:
                     st.markdown("---")
                     st.subheader(f"🔍 Análise de Fluxo Estruturado: {sel_nome}")
                     
-                    # Controles com chave única para esta aba (prefixo rank_)
+                    # --- Análise de Fluxo (Aba Ranking) ---
                     col_rf1, col_rf2 = st.columns(2)
                     with col_rf1:
                         v_min_rank = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"rank_vmin_{sel_cpf}")
                     with col_rf2:
                         n_links_rank = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"rank_nlinks_{sel_cpf}")
                     
-                    with st.spinner("Gerando diagrama de fluxo..."):
-                        fig_sankey_ranking = plot_sankey_envolvido_estruturado(df_display, sel_cpf, sel_nome, min_value=v_min_rank, top_n=n_links_rank)
-                        
-                        if fig_sankey_ranking:
-                            st.plotly_chart(fig_sankey_ranking, use_container_width=True, key=f"sankey_rank_plot_{sel_cpf}")
+                    with st.spinner("Gerando diagrama..."):
+                        fig_sankey_rank = plot_sankey_envolvido_estruturado(df_display, sel_cpf, sel_nome, min_value=v_min_rank, top_n=n_links_rank)
+                        if fig_sankey_rank:
+                            st.plotly_chart(fig_sankey_rank, use_container_width=True, key=f"plot_sankey_rank_{sel_cpf}")
                         else:
                             st.info("Não há vínculos estruturados suficientes para este alvo nos RIFs filtrados.")
 
@@ -4079,326 +3643,9 @@ if st.session_state.data_loaded:
 
                 if selected_indexador:
                     st.markdown("---")
-                    st.subheader(f"Detalhamento completo da comunicação (Indexador {selected_indexador})")
-
-                    # Reutiliza o mecanismo já usado na Análise Individual Detalhada
-                    st.session_state.jumptargetindexador = str(selected_indexador)
-                    st.session_state.triggerjump = True
-
-                    # Chama a mesma lógica da aba "Análise por Comunicação"
-                    # (copie o bloco central da tabcomunicacao para dentro de uma função
-                    #  e invoque aqui, ou reproduza sucintamente os trechos principais)
-                    listaindexadores = ["Selecione..."] + sorted(
-                        st.session_state.df_comunicacoes["Indexador"].astype(str).unique().tolist()
-                    )
-
-                    # Força o selectedindexador a ser o nosso escolhido
-                    # e executa o mesmo conteúdo que você já tem em tabcomunicacao.
-                    comunicacao_detalhe = st.session_state.df_comunicacoes[
-                        st.session_state.df_comunicacoes["Indexador"].astype(str) == str(selected_indexador)
-                    ]
-                    envolvidos_detalhe = st.session_state.df_envolvidos[
-                        st.session_state.df_envolvidos["Indexador"].astype(str).str.strip()
-                        == str(selected_indexador).strip()
-                    ]
-                    ocorrencias_detalhe = st.session_state.df_ocorrencias[
-                        st.session_state.df_ocorrencias["Indexador"].astype(str) == str(selected_indexador)
-                    ]
-
-                    if not comunicacao_detalhe.empty:
-                        comunicacao_info = comunicacao_detalhe.iloc[0]
-
-                        # Exibir Informações Gerais da Comunicação
-                        col1_comm, col2_comm, col3_comm = st.columns(3)
-                        with col1_comm:
-                            st.metric("ID Comunicação", comunicacao_info.get('idComunicacao', 'N/A'))
-                            st.metric("Data Operação", comunicacao_info.get('Data_da_operacao', pd.NaT).strftime('%d/%m/%Y') if pd.notna(comunicacao_info.get('Data_da_operacao')) else 'N/A')
-                        with col2_comm:
-                            st.metric("Comunicante", comunicacao_info.get('nomeComunicante', 'N/A'))
-                            st.metric("Cidade/UF Agência", f"{comunicacao_info.get('CidadeAgencia', 'N/A')} / {comunicacao_info.get('UFAgencia', 'N/A')}")
-                        with col3_comm:
-                            st.metric("Segmento", comunicacao_info.get('CodigoSegmento', 'N/A'))
-                            # Buscar descrição do segmento
-                            desc_campos = df_segmento_desc[df_segmento_desc['CodigoSegmento'] == str(comunicacao_info.get('CodigoSegmento', ''))]
-                            if not desc_campos.empty:
-                                #st.caption(f"Descrição Campos: {desc_campos['DescricaoCampos'].iloc[0]}")
-                                st.info(f"Descrição Campos do Segmento: {desc_campos['DescricaoCampos'].iloc[0]}")
-                            else:
-                                st.caption("Descrição Campos: Segmento não mapeado")
-
-                        st.divider()
-
-                        # --- NOVO: Exibir Titular(es) da Comunicação (com DESTAQUE) ---
-                        st.subheader("👤 Titular(es) da Comunicação")
-                        if not envolvidos_detalhe.empty:
-                            # Filtrar pelos papéis de titular
-                            titulares_df = envolvidos_detalhe[
-                                envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])
-                            ]
-
-                            if not titulares_df.empty:
-                                # Exibir cada titular encontrado
-                                for _, titular_row in titulares_df.iterrows():
-                                    nome_titular = titular_row.get('nomeEnvolvido', 'N/A')
-                                    cpf_titular = titular_row.get('cpfCnpjEnvolvido', 'N/A')
-
-                                    # Formatar tags de PEP e Servidor com estilo
-                                    pep_info = ""
-                                    servidor_info = ""
-                                    if str(titular_row.get('bitPepCitado', 'Não')).lower() == 'sim':
-                                        # Estilo para a tag PEP (fundo vermelho, texto branco)
-                                        pep_info = ' <span style="background-color: #FF6B6B; color: #FFF; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">PEP</span>'
-                                    if str(titular_row.get('intServidorCitado', 'Não')).lower() == 'sim':
-                                        # Estilo para a tag Servidor (fundo amarelo, texto escuro)
-                                        servidor_info = ' <span style="background-color: #FFD700; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">SERVIDOR</span>'
-
-                                    # --- MODIFICADO: Bloco HTML para destaque ---
-                                    # Usamos um <div> com estilo para criar a caixa.
-                                    # Ajuste as cores (background-color, border, color) para o seu tema.
-                                    # Estas cores são otimizadas para o tema escuro das suas screenshots.
-                                    st.markdown(f"""
-                                    <div style="background-color: #222226; border: 1px solid #4C4E54; border-radius: 7px; padding: 12px; margin-bottom: 10px;">
-                                        <div style="font-size: 1.25em; font-weight: bold; color: #FAFAFA; margin-bottom: 5px;">
-                                            {nome_titular} {pep_info} {servidor_info}
-                                        </div>
-                                        <div style="font-size: 1.1em; color: #ADADAD; font-family: monospace;">
-                                            {cpf_titular}
-                                        </div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                    # --- FIM MODIFICAÇÃO ---
-                            else:
-                                st.info("Nenhum envolvido com papel 'Titular' ou 'Titular da Conta' encontrado para este Indexador.")
-                        else:
-                            st.info("Nenhum envolvido encontrado para este Indexador.")
-                        # --- FIM NOVO ---
-
-                        st.divider()
-
-                        # Exibir Valores (Campos A-E) em destaque
-                        st.subheader("Valores Reportados")
-                        val_cols = st.columns(5)
-                        campos = ['A', 'B', 'C', 'D', 'E']
-                        for i, campo in enumerate(campos):
-                            valor_col_name = f'ValorCampo{campo}'
-                            if valor_col_name in comunicacao_info and pd.notna(comunicacao_info[valor_col_name]):
-                                with val_cols[i]:
-                                    st.metric(f"Valor Campo {campo}", f"R$ {comunicacao_info[valor_col_name]:,.2f}")
-                            else:
-                                 with val_cols[i]:
-                                    st.metric(f"Valor Campo {campo}", "R$ 0,00") # Ou N/A
-
-                        st.divider()
-
-                        # Exibir Informações Adicionais
-                        st.subheader("Informações Adicionais")
-                        st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
-
-                        info_adicional = comunicacao_info.get('informacoesAdicionais', 'Nenhuma informação adicional disponível.')
-                        if pd.isna(info_adicional) or info_adicional.strip() == '':
-                             info_adicional = 'Nenhuma informação adicional disponível.'
-                        # Usar text_area para textos longos, definir altura
-                        st.markdown(f"""
-                        <div style="height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 10px; border-radius: 5px; background-color: #f9f9f9; color: #333;">
-                            {info_adicional.replace('<','&lt;').replace('>','&gt;')}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        # st.code(info_adicional, language=None) # language=None evita highlight # Mostra o conteúdo em uma única linha permitindo cópia.
-                        # st.text_area("Detalhes:", value=info_adicional, height=300, disabled=True, key=f"info_{selected_indexador}") # Mostra o conteúdo bloqueado.
-
-                        # --- NOVO: Nuvem de Palavras e Keywords ---
-                        st.divider()
-                        st.subheader("Nuvem de Palavras e Termos Financeiros Frequentes")
-                        with st.spinner("Gerando nuvem de palavras e analisando termos..."):
-                             wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(info_adicional)
-
-                        if wordcloud_img:
-                            st.image(wordcloud_img, caption="Nuvem das palavras mais frequentes (após remoção de stopwords)")
-                        else:
-                            st.caption("Não foi possível gerar a nuvem de palavras.")
-
-                        if df_fin_keywords is not None and not df_fin_keywords.empty:
-                            st.markdown("##### Top Termos Financeiros:")
-                            st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
-
-                            st.markdown("##### Contexto dos Termos:")
-                            if context_map:
-                                for keyword, snippets in context_map.items():
-                                    with st.expander(f"Contexto para '{keyword}' ({len(snippets)} trechos)"):
-                                        for i, snippet in enumerate(snippets):
-                                            #st.markdown(f"_{i+1}_: ...{snippet}...") # Usar markdown para itálico
-                                            st.text_area(
-                                            label=f"Trecho {i+1}", # Rótulo para a caixa de texto
-                                            value=snippet,
-                                            height=100, # Ajuste a altura conforme necessário
-                                            key=f"context_{selected_indexador}_{keyword}_{i}" # Chave única
-                                            )
-                                            if i < len(snippets) - 1: st.markdown("---") # Divisor
-                            else:
-                                st.caption("Não foi possível encontrar contexto para os termos financeiros.")
-                        elif wordcloud_img: # Se a nuvem foi gerada mas keywords não
-                             st.caption("Nenhum termo financeiro relevante encontrado entre as palavras mais frequentes.")
-                        # --- FIM NOVO ---
-
-                        st.divider()
-
-                        # Exibir Ocorrências Vinculadas
-                        st.subheader("Ocorrências Vinculadas")
-                        if not ocorrencias_detalhe.empty:
-                            st.dataframe(ocorrencias_detalhe[['idOcorrencia', 'Ocorrencia']], width='stretch', hide_index=True)
-                        else:
-                            st.info("Nenhuma ocorrência vinculada encontrada para este Indexador.")
-
-                        st.divider()
-
-                        # Exibir Envolvidos Vinculados
-                        st.subheader("Envolvidos Vinculados")
-                        if not envolvidos_detalhe.empty:
-                            # Selecionar e formatar colunas para exibição
-                            cols_envolvidos = ['cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido',
-                                               'bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado',
-                                               'agenciaEnvolvido', 'contaEnvolvido']
-                            cols_envolvidos_exist = [c for c in cols_envolvidos if c in envolvidos_detalhe.columns]
-
-                            # Criar cópia para formatação
-                            envolvidos_display = envolvidos_detalhe[cols_envolvidos_exist].copy()
-
-                            # Formatar booleanos
-                            for flag in ['bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']:
-                                 if flag in envolvidos_display.columns:
-                                     envolvidos_display[flag] = envolvidos_display[flag].apply(lambda x: "Sim" if str(x).lower()=='sim' or x==True else "Não")
-
-                            st.dataframe(envolvidos_display, width='stretch', hide_index=True,
-                                         column_config={
-                                             "cpfCnpjEnvolvido": "CPF/CNPJ",
-                                             "nomeEnvolvido": "Nome",
-                                             "tipoEnvolvido": "Papel",
-                                             "bitPepCitado": "PEP",
-                                             "bitPessoaObrigadaCitado": "P. Obrigada",
-                                             "intServidorCitado": "Servidor P.",
-                                             "agenciaEnvolvido": "Agência Env.",
-                                             "contaEnvolvido": "Conta Env."
-                                         })
-                        else:
-                            st.info("Nenhum envolvido vinculado encontrado para este Indexador.")
-
-
-                        # --- NOVO: Visualização do Grafo da Comunicação ---
-                        st.divider()
-                        st.subheader("Visualização dos Vínculos na Comunicação")
-                        if not envolvidos_detalhe.empty:
-                            with st.spinner("Gerando grafo da comunicação..."):
-                                G_comm, titulares_comm = create_communication_graph(envolvidos_detalhe)
-
-                            if G_comm.number_of_nodes() > 0:
-
-                                # Visualizar o grafo
-                                with st.spinner("Renderizando visualização do grafo..."):
-                                    comm_graph_file = visualize_communication_graph(G_comm, titulares_comm)
-
-                                if comm_graph_file:
-                                    st.components.v1.html(open(comm_graph_file, 'r', encoding='utf-8').read(), height=550)
-                                    st.html(generate_network_legend())
-                                else:
-                                    st.warning("Não foi possível renderizar o grafo da comunicação.")
-                            else:
-                                st.info("Não há envolvidos suficientes ou válidos para gerar um grafo para esta comunicação.")
-                        else:
-                            st.info("Não há envolvidos vinculados para gerar o grafo.")
-
-
-                        # --- MODIFICADO: Tabelas e Gráficos de Fluxo Baseados em Informações Adicionais ---
-                        st.divider()
-                        st.subheader("Resumo do Fluxo (Extraído de Informações Adicionais)")
-                        st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
-
-                        if pd.notna(info_adicional) and info_adicional != 'Nenhuma informação adicional disponível.':
-                            with st.spinner("Analisando texto de informações adicionais..."):
-                                # Chamar a nova função que retorna 3 DataFrames
-                                df_creditos_ext, df_debitos_ext, df_cartao_ext = extract_all_financial_data(info_adicional)
-
-                                # --- NOVO: Diagrama de Sankey ---
-                                st.markdown("##### 🌊 Diagrama de Fluxo (Sankey)")
-
-                                # Determinar o nome do titular para o centro do gráfico
-                                nome_titular_sankey = "Titular/Conta"
-                                # Tentar pegar o nome do titular identificado anteriormente na aba
-                                if not envolvidos_detalhe.empty:
-                                     tits = envolvidos_detalhe[envolvidos_detalhe['tipoEnvolvido'].str.lower().isin(['titular', 'titular da conta'])]
-                                     if not tits.empty:
-                                         nome_titular_sankey = tits.iloc[0]['nomeEnvolvido']
-
-                                if not df_creditos_ext.empty or not df_debitos_ext.empty:
-                                    fig_sankey = plot_sankey_fluxo(df_creditos_ext, df_debitos_ext, nome_titular_sankey)
-                                    if fig_sankey:
-                                        st.plotly_chart(fig_sankey, use_container_width=True)
-                                    else:
-                                        st.caption("Dados insuficientes para gerar o diagrama de fluxo.")
-                                # --- FIM NOVO ---
-                            # --- FIM MODIFICAÇÃO ---
-
-                            st.markdown("##### Principais Origens de Crédito")
-                            if not df_creditos_ext.empty:
-                                # Ordenar por valor para exibição
-                                df_creditos_ext = df_creditos_ext.sort_values('Valor (R$)', ascending=False)
-                                st.dataframe(df_creditos_ext, width='stretch', hide_index=True,
-                                             column_config={
-                                                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                                # Remover 'Detalhe' se não estiver mais presente
-                                             })
-                                fig_cred = px.bar(df_creditos_ext.head(10), y='Origem do Crédito', x='Valor (R$)',
-                                                  orientation='h', title='Top 10 Origens de Crédito',
-                                                  labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
-                                                  text='Valor (R$)', height=400)
-                                fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                                fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
-                                st.plotly_chart(fig_cred, use_container_width=True)
-                            # else: st.caption("Não foi possível extrair origens de crédito.") # Já tratado na função
-
-                            st.markdown("##### Principais Destinos de Débito")
-                            if not df_debitos_ext.empty:
-                                # Ordenar por valor para exibição
-                                df_debitos_ext = df_debitos_ext.sort_values('Valor (R$)', ascending=False)
-                                st.dataframe(df_debitos_ext, width='stretch', hide_index=True,
-                                             column_config={
-                                                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                                # Remover 'Detalhe' se não estiver mais presente
-                                             })
-                                fig_deb = px.bar(df_debitos_ext.head(10), y='Destino do Débito', x='Valor (R$)',
-                                                 orientation='h', title='Top 10 Destinos de Débito',
-                                                 labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
-                                                 text='Valor (R$)', height=400)
-                                fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                                fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
-                                st.plotly_chart(fig_deb, use_container_width=True)
-                            # else: st.caption("Não foi possível extrair destinos de débito.") # Já tratado na função
-
-                            st.markdown("##### Principais Gastos no Cartão")
-                            if not df_cartao_ext.empty:
-                                 # Ordenar por valor para exibição
-                                 df_cartao_ext = df_cartao_ext.sort_values('Valor (R$)', ascending=False)
-                                 st.dataframe(df_cartao_ext, width='stretch', hide_index=True,
-                                             column_config={
-                                                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                                                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                                             })
-                                 fig_card = px.bar(df_cartao_ext.head(10), y='Estabelecimento', x='Valor (R$)',
-                                                   orientation='h', title='Top 10 Gastos no Cartão de Crédito',
-                                                   labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
-                                                   text='Valor (R$)', height=400)
-                                 fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                                 fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
-                                 st.plotly_chart(fig_card, use_container_width=True)
-                            # else: st.caption("Não foi possível extrair gastos no cartão.") # Já tratado na função
-
-                        else:
-                            st.info("Campo 'Informações Adicionais' vazio ou indisponível para gerar gráficos de fluxo.")
-                        # --- FIM MODIFICAÇÃO Bloco Gráficos ---                        
-                        
-                    else:
-                        st.warning(f"Nenhum detalhe de comunicação encontrado para o Indexador {selected_indexador}.")
+                    st.subheader(f"🔍 Detalhamento da Comunicação {selected_indexador}")
+                    # Chama a função mestre com prefixo exclusivo para esta aba
+                    render_analise_comunicacao(selected_indexador, key_prefix="aba_ranking_com")
                 else:
                     st.caption("Selecione uma linha na tabela acima para ver o detalhamento completo da comunicação.")
     
@@ -4493,30 +3740,43 @@ elif process_button and (not file_ocorrencias or not file_envolvidos or not file
 
 
 # --- Seção de Ajuda (Sempre visível) ---
-with st.expander("❓ Ajuda"):
-    st.markdown("""
+with st.expander("❓ Ajuda e Guia de Uso"):
+    st.markdown("""        
+    ### **❓ Ajuda e Guia de Uso**
+
     **Como usar:**
-    1. Faça upload dos 3 arquivos CSV (`Ocorrencias`, `Envolvidos`, `Comunicacoes`) na barra lateral.
-    2. Clique no botão **Processar Arquivos Carregados** na barra lateral. O processamento inicial pode levar um tempo.
-    3. Utilize os filtros na barra lateral para refinar a análise por data ou tipo de ocorrência. Os dados nas abas serão atualizados automaticamente.
-    4. Explore a aba **Análise Geral** para ter uma visão macro dos dados filtrados. Note que as agregações de valor usam o CampoA por padrão.
-    5. Verifique a aba **Padrões Suspeitos** para alertas de alto risco identificados nos dados filtrados, incluindo o novo padrão de "Alto Valor em Espécie".
-    6. Vá para a aba **Análise de Rede Individual**, selecione um envolvido para visualizar sua rede de conexões diretas (baseado nos filtros atuais).
-    7. Na aba **Análise Individual Detalhada**, selecione um envolvido para ver seu dossiê completo, incluindo o significado dos Campos A-E para o segmento da comunicação e os valores corretos.
-    8. A aba **Análise por Comunicação** apresenta uma análise detalhada da comunicação. Selecione o indexador da comunicação desejada.
-    9. Clique em **Gerar Relatório Excel** (se habilitado) para baixar as tabelas e análises baseadas nos filtros correntes, incluindo uma aba com a legenda dos segmentos.
 
-    **Formato esperado:**
-    - Arquivos CSV com separador `;`
-    - Colunas de data no formato DD/MM/AAAA (com ou sem hora)
-    - Valores numéricos no formato brasileiro (ex: 1.234,56) ou americano (1234.56).
-    - Valores nulos/ausentes como campos vazios, `-`, `#N/D`, `N/A`.
-    - Codificação UTF-8 ou Latin1 (ou similar compatível)
+    1. **Carga de Dados:** Faça upload dos 3 arquivos CSV (`Ocorrencias`, `Envolvidos`, `Comunicacoes`) na barra lateral.
+    2. **Processamento:** Clique em **"Processar Arquivos Carregados"**. O sistema realizará a limpeza de valores, normalização de nomes e conversão de datas.
+    3. **Filtros Inteligentes:** Utilize a barra lateral para refinar os dados por **Período**, **Ano/Mês** ou **Tipo de Ocorrência**. Todas as abas e métricas serão recalculadas instantaneamente.
+    4. **Navegação Integrada:** Ao selecionar um envolvido no **Ranking** ou uma comunicação no **Ranking de Comunicações**, o sistema abrirá automaticamente o detalhamento completo naquela mesma página.
+    5. **Exportação:** Clique em **"Gerar Relatório Excel"** para baixar um dossiê consolidado com os dados filtrados e os rankings calculados.
 
-    **Abas:**
-    - **Análise Geral:** Visão macro dos dados filtrados.
-    - **Padrões Suspeitos:** Detecção de comportamentos atípicos nos dados filtrados.
-    - **Análise de Rede Individual:** Visualização da rede de conexões para um envolvido específico.
-    - **Análise Individual Detalhada:** Detalhes específicos por envolvido, com contexto e valores corretos dos campos de valor.
-    - **Análise por Comunicação:** Análise detalhada da comunicação. O Diagrama de Fluxo (Sankey) e as tabelas de origens dos créditos e destinos dos débitos são extraídas do campo 'Informações Adicionais'. Por se tratar de uma extração em texto livre, pode conter erros. **Sempre confirme analisando o texto original**.
+    **Destaques Técnicos da Versão 3.2:**
+
+    * **Integridade Financeira:** O sistema utiliza lógica de "achatamento" (agregação por valor máximo por RIF), impedindo que valores sejam inflados artificialmente por múltiplas ocorrências ou envolvidos.
+    * **Detecção de Risco Rigorosa:** A identificação de PEPs e Servidores Públicos segue uma validação booleana estrita (`True/False`), garantindo que apenas registros confirmados recebam as tags de alerta.
+    * **Fluxo Estruturado:** Diferente da análise de texto, o novo diagrama de fluxo utiliza os papéis oficiais (Remetente, Titular, Beneficiário) para desenhar o caminho do dinheiro.
+
+    **Descrição das Abas:**
+
+    * **📊 Análise Geral:** Visão macro dos dados. Inclui a **Evolução Temporal Real** (contagem por indexadores únicos), o **Detalhamento de Movimentações em Espécie** (mapeado por segmento) e a **Análise da Lei de Benford** para detecção de anomalias.
+    * *Nota sobre Benford:* Estatisticamente válida para amostras acima de 500 registros. Use como tendência visual em conjuntos menores.
+
+
+    * **🏆 Ranking de Envolvidos:** Placar de risco que combina indicadores matemáticos (como o índice de concentração HHI) com 17 padrões comportamentais suspeitos. Ao selecionar um alvo, exibe o **Diagrama de Fluxo Estruturado** com filtros de valor mínimo e agrupamento automático de pequenas contrapartes em nós "Outros".
+    * **👤 Análise Individual Detalhada:** Dossiê completo do envolvido, apresentando a força dos vínculos com contrapartes, histórico temporal de citações e o significado dos campos de valor (A-E) específicos para cada segmento reportado.
+    * **💬 Ranking de Comunicações:** Classifica os RIFs mais críticos baseando-se em volume financeiro, complexidade da rede de envolvidos e presença de perfis de risco.
+    * **🔎 Análise por Comunicação:** Detalhamento técnico de um RIF específico. Apresenta o **Grafo de Vínculos** (Rede de relacionamentos), tabelas de envolvidos e o **Fluxo Extraído da Narrativa**.
+    * *Aviso:* O diagrama baseado em texto livre pode conter imprecisões; sempre valide com a narrativa original exibida na tela.
+
+
+    * **🌐 Análise de Rede Individual:** Visualização interativa da rede de conexões diretas de um CPF/CNPJ, permitindo identificar comunidades financeiras e contas-âncora.
+
+    **Formato de Arquivos Suportado:**
+
+    * **Separador:** Ponto e vírgula (`;`).
+    * **Datas:** Formatos `DD/MM/AAAA`.
+    * **Valores:** Padrão brasileiro (`1.234,56`) ou internacional (`1234.56`).
+    * **Segurança:** **Nunca** utilize LLMs abertas (públicas) para processar os textos das narrativas adicionais.
     """)
