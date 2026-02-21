@@ -80,20 +80,39 @@ st.title(f"🔍 RIF Analyst {VERSAO} \nAnálise de RIF - NAE/CGU/SC  - Versão {
 # ==============================================
 
 @st.cache_data
+
 def load_data(uploaded_file):
-    """Carrega arquivos CSV com tratamento robusto para datas e valores"""
+    """Carrega arquivos CSV interrompendo a leitura na primeira linha em branco encontrada."""
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
     file_name = uploaded_file.name if uploaded_file else "Arquivo Desconhecido"
+    
     for encoding in encodings:
         try:
             uploaded_file.seek(0)
+            # Lê o conteúdo bruto e decodifica conforme o encoding atual
+            raw_text = uploaded_file.read().decode(encoding)
+            lines = raw_text.splitlines()
+            
+            # Filtra as linhas até encontrar a primeira linha vazia
+            valid_lines = []
+            for line in lines:
+                # Verifica se a linha está vazia ou se contém apenas separadores ';'
+                # O strip() remove espaços e o replace(';', '') verifica se sobrou algo
+                if not line.strip() or line.strip().replace(';', '') == '':
+                    break
+                valid_lines.append(line)
+            
+            # Reconstrói o conteúdo filtrado como um buffer de memória
+            truncated_content = StringIO('\n'.join(valid_lines))
+            
+            # Carrega o DataFrame apenas com o conteúdo antes da interrupção
             df = pd.read_csv(
-                uploaded_file,
+                truncated_content,
                 sep=';',
                 encoding=encoding,
                 low_memory=False,
                 na_values=['-', '', '#N/D', 'N/A']
-             )
+            )
 
             # Tratar colunas de data
             date_cols = [col for col in df.columns if 'data' in col.lower()]
@@ -2092,7 +2111,7 @@ if process_button and file_ocorrencias and file_envolvidos and file_comunicacoes
             comm_cols_merge_base = ['Indexador', 'idComunicacao', 'Data_da_operacao', 'CodigoSegmento', 'ValorTotal']
             #comm_cols_merge_vals = [f'Valor{c}' for c in ['A','B','C','D','E'] if f'Valor{c}' in df_comunicacoes.columns]
             comm_cols_merge_vals = [f'ValorCampo{c}' for c in ['A','B','C','D','E'] if f'ValorCampo{c}' in df_comunicacoes.columns]
-            comm_cols_merge_info = ['informacoesAdicionais', 'CidadeAgencia', 'NumeroAgencia', 'UFAgencia']
+            comm_cols_merge_info = ['informacoesAdicionais', 'CidadeAgencia', 'NumeroAgencia', 'UFAgencia', 'nomeComunicante', 'cpfCnpjComunicante']
             comm_cols_merge = list(set(comm_cols_merge_base + comm_cols_merge_vals + comm_cols_merge_info).intersection(df_comunicacoes.columns))
 
             env_cols_merge_base = ['Indexador', 'cpfCnpjEnvolvido', 'nomeEnvolvido', 'tipoEnvolvido', 'bitPepCitado', 'bitPessoaObrigadaCitado', 'intServidorCitado']
@@ -3742,41 +3761,40 @@ elif process_button and (not file_ocorrencias or not file_envolvidos or not file
 # --- Seção de Ajuda (Sempre visível) ---
 with st.expander("❓ Ajuda e Guia de Uso"):
     st.markdown("""        
-    ### **❓ Ajuda e Guia de Uso**
+    ### **❓ Ajuda e Guia de Uso (Versão 3.2)**
 
     **Como usar:**
 
     1. **Carga de Dados:** Faça upload dos 3 arquivos CSV (`Ocorrencias`, `Envolvidos`, `Comunicacoes`) na barra lateral.
-    2. **Processamento:** Clique em **"Processar Arquivos Carregados"**. O sistema realizará a limpeza de valores, normalização de nomes e conversão de datas.
-    3. **Filtros Inteligentes:** Utilize a barra lateral para refinar os dados por **Período**, **Ano/Mês** ou **Tipo de Ocorrência**. Todas as abas e métricas serão recalculadas instantaneamente.
-    4. **Navegação Integrada:** Ao selecionar um envolvido no **Ranking** ou uma comunicação no **Ranking de Comunicações**, o sistema abrirá automaticamente o detalhamento completo naquela mesma página.
-    5. **Exportação:** Clique em **"Gerar Relatório Excel"** para baixar um dossiê consolidado com os dados filtrados e os rankings calculados.
+    2. **Processamento Inteligente:** Clique em **"Processar Arquivos Carregados"**. O sistema interromperá a leitura automaticamente ao encontrar linhas em branco e realizará o "achatamento" dos dados financeiros para evitar inflação de valores por multiplicidade de ocorrências.
+    3. **Refinamento por Filtros:** Utilize a barra lateral para filtrar a análise por **Período**, **Ano/Mês** ou **Tipo de Ocorrência**. Todas as tabelas e gráficos serão recalculados instantaneamente com base na seleção.
+    4. **Detalhamento Integrado:** Ao clicar em uma linha na tabela do **Ranking de Envolvidos** ou **Ranking de Comunicações**, o detalhamento técnico completo será carregado logo abaixo na mesma aba.
+    5. **Exportação:** Gere relatórios em **Excel** contendo todos os dados filtrados e os rankings calculados.
+    
+    **IMPORTANTE: Nenhuma informação pode ser usada em documentos externos.**
 
-    **Destaques Técnicos da Versão 3.2:**
+    **Destaques da Versão 3.2:**
 
-    * **Integridade Financeira:** O sistema utiliza lógica de "achatamento" (agregação por valor máximo por RIF), impedindo que valores sejam inflados artificialmente por múltiplas ocorrências ou envolvidos.
-    * **Detecção de Risco Rigorosa:** A identificação de PEPs e Servidores Públicos segue uma validação booleana estrita (`True/False`), garantindo que apenas registros confirmados recebam as tags de alerta.
-    * **Fluxo Estruturado:** Diferente da análise de texto, o novo diagrama de fluxo utiliza os papéis oficiais (Remetente, Titular, Beneficiário) para desenhar o caminho do dinheiro.
+    * **Integridade Financeira:** Os cálculos de volume financeiro utilizam o valor máximo por RIF (`max`), impedindo que o "Efeito Multiplicador" gere totais bilionários irreais.
+    * **Detecção de Risco Booleana:** A identificação de PEPs e Servidores Públicos segue uma validação booleana estrita (`== True`), eliminando marcações incorretas em titulares que não possuem esses perfis.
+    * **Fluxo Estruturado:** Diagramas de Sankey agora podem ser gerados com base nos papéis oficiais registrados (Remetente  Titular  Beneficiário), com filtros de legibilidade e agrupamento em nós "Outros" para facilitar a visualização de grandes redes.
 
     **Descrição das Abas:**
 
-    * **📊 Análise Geral:** Visão macro dos dados. Inclui a **Evolução Temporal Real** (contagem por indexadores únicos), o **Detalhamento de Movimentações em Espécie** (mapeado por segmento) e a **Análise da Lei de Benford** para detecção de anomalias.
-    * *Nota sobre Benford:* Estatisticamente válida para amostras acima de 500 registros. Use como tendência visual em conjuntos menores.
+    * **📊 Análise Geral:** Visão macro dos dados. Apresenta a **Evolução Temporal Real** (contagem por indexadores únicos), o **Ranking por Cidades** e o **Detalhamento de Movimentações em Espécie** mapeado por segmento.
+    * *Estatística:* Inclui a **Lei de Benford** para detecção de anomalias numéricas (indicado para amostras  registros).
 
 
-    * **🏆 Ranking de Envolvidos:** Placar de risco que combina indicadores matemáticos (como o índice de concentração HHI) com 17 padrões comportamentais suspeitos. Ao selecionar um alvo, exibe o **Diagrama de Fluxo Estruturado** com filtros de valor mínimo e agrupamento automático de pequenas contrapartes em nós "Outros".
-    * **👤 Análise Individual Detalhada:** Dossiê completo do envolvido, apresentando a força dos vínculos com contrapartes, histórico temporal de citações e o significado dos campos de valor (A-E) específicos para cada segmento reportado.
-    * **💬 Ranking de Comunicações:** Classifica os RIFs mais críticos baseando-se em volume financeiro, complexidade da rede de envolvidos e presença de perfis de risco.
-    * **🔎 Análise por Comunicação:** Detalhamento técnico de um RIF específico. Apresenta o **Grafo de Vínculos** (Rede de relacionamentos), tabelas de envolvidos e o **Fluxo Extraído da Narrativa**.
-    * *Aviso:* O diagrama baseado em texto livre pode conter imprecisões; sempre valide com a narrativa original exibida na tela.
+    * **🏆 Ranking de Envolvidos:** Placar de risco consolidado que une indicadores matemáticos (como concentração HHI e fracionamento temporal) com 17 padrões comportamentais suspeitos extraídos das narrativas.
+    * **👤 Análise Individual Detalhada:** Dossiê exaustivo de um CPF/CNPJ, mostrando a força dos vínculos com contrapartes e o significado exato dos campos de valor para cada segmento.
+    * **💬 Ranking de Comunicações:** Classificação dos RIFs por criticidade, complexidade e volume.
+    * **🔎 Análise por Comunicação:** Detalhamento de um RIF específico, incluindo o **Grafo de Vínculos** interativo, a lista de envolvidos vinculados e o fluxo financeiro extraído via texto das informações adicionais.
+    * **🌐 Análise de Rede Individual:** Mapa de conexões diretas para identificar comunidades financeiras e contas de passagem.
 
+    **Formato Esperado:**
 
-    * **🌐 Análise de Rede Individual:** Visualização interativa da rede de conexões diretas de um CPF/CNPJ, permitindo identificar comunidades financeiras e contas-âncora.
-
-    **Formato de Arquivos Suportado:**
-
-    * **Separador:** Ponto e vírgula (`;`).
-    * **Datas:** Formatos `DD/MM/AAAA`.
-    * **Valores:** Padrão brasileiro (`1.234,56`) ou internacional (`1234.56`).
-    * **Segurança:** **Nunca** utilize LLMs abertas (públicas) para processar os textos das narrativas adicionais.
+    * Arquivos CSV com separador `;`.
+    * Datas em formato `DD/MM/AAAA`.
+    * Valores numéricos em formato brasileiro (`1.234,56`) ou internacional (`1234.56`).
+    * **Segurança:** Nunca processe dados sigilosos em LLMs abertas ou públicas.
     """)
