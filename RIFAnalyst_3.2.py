@@ -18,7 +18,12 @@ import matplotlib.pyplot as plt
 import openpyxl
 import string 
 import io
+import time
 import indicadores as rif_ind
+
+# Inicializar contador de versão dos widgets para limpeza total
+if 'uploader_id' not in st.session_state:
+    st.session_state.uploader_id = 0
 
 # Mapeamento de CodigoSegmento para significado dos campos
 #
@@ -144,6 +149,28 @@ MAX_CONEXOES_REDE = 600
 VERSAO = '3.2'
 DATA_VERSAO = '21/02/2026'
 
+def realizar_limpeza_seguranca():
+    """Limpa cache, arquivos e força o reset dos widgets de upload."""
+    st.cache_data.clear()
+    
+    # Deletar temporários de rede
+    import os, glob
+    temp_dir = tempfile.gettempdir()
+    temp_files = glob.glob(os.path.join(temp_dir, "*_net_*.html")) + \
+                 glob.glob(os.path.join(temp_dir, "*_comm_*.html"))
+    for f in temp_files:
+        try: os.remove(f)
+        except: pass
+            
+    # Limpar sessão e incrementar o ID do widget
+    new_id = st.session_state.uploader_id + 1
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # Reiniciar com um novo ID de widget para limpar a barra lateral
+    st.session_state.uploader_id = new_id
+    st.session_state.last_activity = time.time()
+
 # Configurações da página
 st.set_page_config(
     page_title="Análise de RIF - NAE/CGU/SC",
@@ -153,12 +180,33 @@ st.set_page_config(
 
 st.title(f"🔍 RIF Analyst {VERSAO} \nAnálise de RIF - NAE/CGU/SC  - Versão {VERSAO} - {DATA_VERSAO}")
 
+
+
+# --- LÓGICA DO TEMPORIZADOR DE INATIVIDADE (30 MINUTOS) ---
+TIMEOUT_LIMIT = 30 * 60  # 30 minutos em segundos
+current_time = time.time()
+
+if 'last_activity' not in st.session_state:
+    st.session_state.last_activity = current_time
+
+# Calcular tempo decorrido
+elapsed_time = current_time - st.session_state.last_activity
+
+if elapsed_time > TIMEOUT_LIMIT:
+    realizar_limpeza_seguranca()
+    st.error("🚨 Sessão expirada por inatividade. Todos os dados foram removidos por segurança.")
+    st.info("Por favor, recarregue a página e faça o upload dos ficheiros novamente.")
+    st.stop() # Interrompe a execução aqui
+
+# Atualizar o marcador de última atividade a cada interação válida
+st.session_state.last_activity = current_time
+
+
 # ==============================================
 # FUNÇÕES AUXILIARES
 # ==============================================
 
 @st.cache_data
-
 def load_data(uploaded_file):
     """Carrega arquivos CSV interrompendo a leitura na primeira linha em branco encontrada."""
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
@@ -2144,9 +2192,11 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
 
 # Upload de arquivos
 st.sidebar.header("📤 Carregamento de Dados")
-file_ocorrencias = st.sidebar.file_uploader("Ocorrencias.csv", type=['csv'], key="up_ocor")
-file_envolvidos = st.sidebar.file_uploader("Envolvidos.csv", type=['csv'], key="up_env")
-file_comunicacoes = st.sidebar.file_uploader("Comunicacoes.csv", type=['csv'], key="up_comm")
+v_id = st.session_state.uploader_id
+
+file_ocorrencias = st.sidebar.file_uploader("Ocorrencias.csv", type=['csv'], key=f"up_ocor_{v_id}")
+file_envolvidos = st.sidebar.file_uploader("Envolvidos.csv", type=['csv'], key=f"up_env_{v_id}")
+file_comunicacoes = st.sidebar.file_uploader("Comunicacoes.csv", type=['csv'], key=f"up_comm_{v_id}")
 
 # Inicializar variáveis de estado
 if 'df_final' not in st.session_state: st.session_state.df_final = None
@@ -2462,6 +2512,17 @@ if st.session_state.data_loaded:
 
 
     st.sidebar.caption(f"Registros após filtros: {len(df_display)}")
+    
+    # --- SEÇÃO: Segurança e Encerramento de Sessão ---
+    st.sidebar.divider()
+    st.sidebar.subheader("🛡️ Segurança e Sessão")
+    
+    if st.sidebar.button("🧹 Encerrar Sessão e Limpar Dados", 
+                         help="Remove todos os dados da memória e apaga ficheiros temporários imediatamente."):
+        realizar_limpeza_seguranca()
+        st.success("Sessão encerrada com sucesso!")
+        st.rerun()
+            
 
     # --- Geração da Lista de Envolvidos ---
     if not df_display.empty:
