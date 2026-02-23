@@ -20,8 +20,6 @@
 
 **IMPORTANTE: Nenhuma informação pode ser usada em documentos externos.**
 
-
-
 #### Descrição das Abas:
 
 **📊Análise Geral:** Visão macro dos dados. Apresenta a **Evolução Temporal Real** (contagem por indexadores únicos), o **Ranking por Cidades** e o **Detalhamento de Movimentações em Espécie** mapeado por segmento.
@@ -38,8 +36,6 @@
 
 **🌐 Análise de Rede Individual:** Mapa de conexões diretas para identificar comunidades financeiras e contas de passagem.
 
-
-
 #### Destaques da Versão 3.2 (Melhorias e Bugs corrigidos)
 
 **Integridade Financeira:** Os cálculos de volume financeiro utilizam o valor máximo por RIF (`max`), impedindo que o "Efeito Multiplicador" gere totais bilionários irreais.
@@ -53,9 +49,4 @@
 * Todos os dados carregados na memória são removidos ao encerrar a sessão. 
 
 * Após 30 minutos de inatividade o sistema encerra automaticamente a sessão e elimina todos os dados carregados.
-
-
-
 - ##### Segurança: Nunca processe dados sigilosos em LLMs abertas ou públicas.
-  
-   

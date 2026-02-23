@@ -195,7 +195,7 @@ elapsed_time = current_time - st.session_state.last_activity
 if elapsed_time > TIMEOUT_LIMIT:
     realizar_limpeza_seguranca()
     st.error("🚨 Sessão expirada por inatividade. Todos os dados foram removidos por segurança.")
-    st.info("Por favor, recarregue a página e faça o upload dos ficheiros novamente.")
+    st.info("Por favor, recarregue a página e faça o upload dos arquivos novamente.")
     st.stop() # Interrompe a execução aqui
 
 # Atualizar o marcador de última atividade a cada interação válida
@@ -487,6 +487,8 @@ def plot_relacionamentos_envolvido(df_full: pd.DataFrame, cpf_base: str):
         return None
 
     df_sub = df_local[df_local["Indexador_x"].isin(idx_envolvido)].copy()
+    
+    df_sub = df_sub.drop_duplicates(subset=["Indexador_x", "cpfCnpjEnvolvido"])
 
     # Self-merge para obter pares (base, contraparte) nas mesmas comunicações
     df_pairs = df_sub.merge(
@@ -2103,11 +2105,22 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
                 st.markdown("##### Top Termos Financeiros:")
                 st.dataframe(df_fin_keywords, hide_index=True, width=400) # Tabela menor
                 
-                st.markdown("##### Contexto dos Termos:")
-                for keyword, snippets in context_map.items():
-                    with st.expander(f"Contexto para '{keyword}'"):
-                        for i, snip in enumerate(snippets):
-                            st.text_area(label=f"Ocorrência {i+1}", value=snip, height=80, key=f"{key_prefix}_ctx_{selected_indexador}_{keyword}_{i}")
+                # ESSA SESSÃO FOI ELIMINADA PARA SIMPLIFICAR A EXIBIÇÃO.
+                #st.markdown("##### Contexto dos Termos:")
+                #if context_map:
+                #    for keyword, snippets in context_map.items():
+                #        with st.expander(f"Contexto para '{keyword}' ({len(snippets)} trechos)"):
+                #            for i, snippet in enumerate(snippets):
+                #                #st.markdown(f"_{i+1}_: ...{snippet}...") # Usar markdown para itálico
+                #                st.text_area(
+                #                label=f"Trecho {i+1}", # Rótulo para a caixa de texto
+                #                value=snippet,
+                #                height=100, # Ajuste a altura conforme necessário
+                #                key=f"context_{selected_indexador}_{keyword}_{i}" # Chave única
+                #                )
+                #                if i < len(snippets) - 1: st.markdown("---") # Divisor
+                #else:
+                #    st.caption("Não foi possível encontrar contexto para os termos financeiros.")
 
             # 6. Fluxo Financeiro (Sankey e Barras)
             st.divider()
@@ -2518,7 +2531,7 @@ if st.session_state.data_loaded:
     st.sidebar.subheader("🛡️ Segurança e Sessão")
     
     if st.sidebar.button("🧹 Encerrar Sessão e Limpar Dados", 
-                         help="Remove todos os dados da memória e apaga ficheiros temporários imediatamente."):
+                         help="Remove todos os dados da memória e apaga arquivos temporários imediatamente."):
         realizar_limpeza_seguranca()
         st.success("Sessão encerrada com sucesso!")
         st.rerun()
