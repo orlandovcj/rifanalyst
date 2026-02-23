@@ -578,8 +578,8 @@ def plot_sankey_envolvido_estruturado(df_envolvido_full, selected_cpf, selected_
         for _, row in rif_data.iterrows():
             if row['cpfCnpjEnvolvido'] == selected_cpf: continue
             
-            tipo = 'Entrada' if row['tipoEnvolvido_Norm'] in ['REMETENTE', 'DEPOSITANTE'] else \
-                   'Saída' if row['tipoEnvolvido_Norm'] in ['BENEFICIARIO', 'SACADOR'] else None
+            tipo = 'Entrada' if row['tipoEnvolvido_Norm'] in ['REMETENTE', 'DEPOSITANTE', 'VENDEDOR'] else \
+                   'Saída' if row['tipoEnvolvido_Norm'] in ['BENEFICIARIO', 'SACADOR', 'COMPRADOR'] else None
             
             if tipo:
                 fluxos.append({'Entidade': row['nomeEnvolvido'], 'Valor': v, 'Tipo': tipo})
@@ -1255,17 +1255,13 @@ def analyze_suspicious_patterns(_df_display, _df_ocorrencias, _df_comunicacoes, 
 # --- NOVO: Função para criar grafo de UMA comunicação ---
 def create_communication_graph(df_envolvidos_comunicacao):
     """Cria um grafo NetworkX DIRECIONAL para os envolvidos de uma única comunicação,
-       mostrando o fluxo: Remetente -> Titular -> Beneficiário."""
+       mostrando fluxos financeiros (sólidos) e vínculos associativos (tracejados)."""
     G_comm = nx.DiGraph()
 
-    # Dicionários para mapear nós para seus papéis
     node_roles = {}
     titulares = []
-    remetentes = []
-    beneficiarios = []
-    outros_papeis = [] # Para sócios, responsáveis, outros, etc.
 
-    # Adicionar nós com atributos
+    # 1. Adicionar nós com atributos e mapear papéis principais
     for _, row in df_envolvidos_comunicacao.iterrows():
         node_id = str(row.get('cpfCnpjEnvolvido', 'DESCONHECIDO')).strip()
         if node_id == 'DESCONHECIDO': continue
@@ -1273,81 +1269,65 @@ def create_communication_graph(df_envolvidos_comunicacao):
         nome = normalize_string(row.get('nomeEnvolvido', 'DESCONHECIDO'))
         tipo = str(row.get('tipoEnvolvido', 'Desconhecido')).lower().strip()
 
-        # Armazenar papel principal (se houver múltiplos para o mesmo CPF/CNPJ, priorizar Titular > Beneficiário > Remetente)
-        if node_id not in node_roles or tipo == 'titular da conta' or tipo == 'titular':
+        # Priorização de papel: Titular tem precedência sobre outros papéis para o mesmo CPF
+        if node_id not in node_roles or tipo in ['titular da conta', 'titular']:
              node_roles[node_id] = tipo
-        elif tipo == 'beneficiário' and node_roles[node_id] != 'titular da conta' and node_roles[node_id] != 'titular':
-             node_roles[node_id] = tipo
-        elif tipo == 'remetente' and node_roles[node_id] not in ['titular da conta', 'titular', 'beneficiário']:
-             node_roles[node_id] = tipo
-        # Se já existe e o novo tipo não é prioritário, mantém o anterior (ou adiciona a outros se ainda não classificado)
         elif node_id not in node_roles:
-            node_roles[node_id] = tipo
+             node_roles[node_id] = tipo
 
-        # Adicionar nó ao grafo (se ainda não existir com os dados principais)
         if node_id not in G_comm:
             G_comm.add_node(
                 node_id,
                 label=nome,
-                # Atributos booleanos (pegar da primeira ocorrência encontrada)
                 pep=True if str(row.get('bitPepCitado', 'Não')).lower() == 'sim' else False,
                 servidor=True if str(row.get('intServidorCitado', 'Não')).lower() == 'sim' else False
-                # Role será adicionado depois com base no mapeamento final
             )
 
-    # Classificar nós e adicionar atributo 'role' final
+    # 2. Identificar titulares e definir rótulos (roles) finais dos nós
     for node_id, role in node_roles.items():
-        if role == 'titular da conta' or role == 'titular':
+        if role in ['titular da conta', 'titular']:
             titulares.append(node_id)
-            G_comm.nodes[node_id]['role'] = 'Titular' # Padronizar nome
-        elif role == 'remetente':
-            remetentes.append(node_id)
-            G_comm.nodes[node_id]['role'] = 'Remetente'
-        elif role == 'beneficiário' or role == 'beneficiario': # Acentuação
-             beneficiarios.append(node_id)
-             G_comm.nodes[node_id]['role'] = 'Beneficiário'
+            G_comm.nodes[node_id]['role'] = 'Titular'
         else:
-            outros_papeis.append(node_id)
-            G_comm.nodes[node_id]['role'] = role.capitalize() # Capitalizar outros papéis
+            G_comm.nodes[node_id]['role'] = role.capitalize()
 
-    # Adicionar Arestas Direcionais de Fluxo
-    # Remetente(s) -> Titular(es)
-    for r, t in product(remetentes, titulares):
-        if G_comm.has_node(r) and G_comm.has_node(t):
-            G_comm.add_edge(r, t, operation='Remessa')
+    # 3. Categorias para definição do tipo de linha (sólida vs tracejada)
+    financeiro_entrada = ['remetente', 'vendedor', 'depositante']
+    financeiro_saida = ['beneficiário', 'beneficiario', 'comprador', 'sacador']
+    # Papéis que representam vínculo administrativo/legal, não necessariamente fluxo de caixa
+    associativo = ['sócio', 'socio', 'procurador', 'representante', 'responsável', 'responsavel', 'outros', 'procurador / representante legal']
 
-    # Titular(es) -> Beneficiário(s)
-    for t, b in product(titulares, beneficiarios):
-         if G_comm.has_node(t) and G_comm.has_node(b):
-            G_comm.add_edge(t, b, operation='Benefício')
-
-    # Conectar Outros Papéis ao(s) Titular(es) (bidirecional para associação)
-    if titulares: # Apenas se houver titular
-        for o, t in product(outros_papeis, titulares):
-            if G_comm.has_node(o) and G_comm.has_node(t):
-                 # Evitar auto-loops se alguém for 'outro' e 'titular' por algum motivo
-                 if o != t:
-                    G_comm.add_edge(o, t, operation='Associado')
-                    G_comm.add_edge(t, o, operation='Associado')
-    elif len(G_comm.nodes()) > 1:
-        # Se não há titular, criar uma ligação simples entre todos para mostrar que estão juntos
-        # (Alternativa: não criar nenhuma aresta)
-        st.caption("Sem titular definido, mostrando todos os envolvidos conectados.")
-        for node1, node2 in combinations(G_comm.nodes(), 2):
-            G_comm.add_edge(node1, node2, operation='Vínculo')
-            # G_comm.add_edge(node2, node1, operation='Vínculo') # Opcional: bidirecional
-
-    return G_comm, titulares # Retorna lista de titulares para destaque na visualização
+    # 4. Criação das Arestas com distinção de estilo (atributo dash)
+    if titulares:
+        for node_id, role in node_roles.items():
+            role_l = role.lower().strip()
+            
+            for t in titulares:
+                if node_id == t: continue
+                
+                # FLUXO FINANCEIRO: Linha Sólida (padrão)
+                if any(x in role_l for x in financeiro_entrada):
+                    G_comm.add_edge(node_id, t, operation='Fluxo: Entrada', dash=False)
+                elif any(x in role_l for x in financeiro_saida):
+                    G_comm.add_edge(t, node_id, operation='Fluxo: Saída', dash=False)
+                
+                # VÍNCULO ASSOCIATIVO: Linha Pontilhada (Tracejada) e Bidirecional
+                elif any(a in role_l for a in associativo):
+                    G_comm.add_edge(node_id, t, operation='Vínculo: Associativo', dash=True)
+                    G_comm.add_edge(t, node_id, operation='Vínculo: Associativo', dash=True)
+    
+    return G_comm, titulares
 
 # --- NOVO: Função para visualizar grafo de UMA comunicação ---
 def visualize_communication_graph(G, titulares_cpf):
-    """Gera visualização Pyvis para o grafo de uma comunicação, destacando titulares."""
+    """Gera visualização Pyvis destacando fluxos financeiros (sólidos) e associações (tracejadas)."""
     if G is None or G.number_of_nodes() == 0:
         st.warning("Grafo da comunicação está vazio.")
         return None
 
     net = Network(height="500px", width="100%", bgcolor="#f0f2f6", font_color="black", directed=True)
 
+    # Configuração visual dos Nós (Cor baseada em Perfil de Risco/Papel)
     for node in G.nodes():
         node_data = G.nodes[node]
         is_titular = node in titulares_cpf
@@ -1370,32 +1350,49 @@ def visualize_communication_graph(G, titulares_cpf):
                   ("\n**Titular da Conta**" if is_titular else "")
         )
 
+    # Configuração visual das Arestas (Sólidas para Fluxo vs Tracejadas para Associações)
+    # Configuração visual das Arestas (Cores por tipo de fluxo e estilo por papel)
     for edge in G.edges(data=True):
         source, target, data = edge
         if source in G and target in G:
-            net.add_edge(source, target, title=data.get('operation', 'conexão'))
+            is_dashed = data.get('dash', False)
+            op = data.get('operation', '')
 
+            # Determinação da cor baseada no tipo de fluxo
+            if is_dashed:
+                edge_color = "#848484" # Cinza para vínculos associativos
+            elif "Entrada" in op:
+                edge_color = "#2B7CE9" # Azul para Entradas no Titular
+            elif "Saída" in op:
+                edge_color = "#E74C3C" # Vermelho para Saídas do Titular
+            else:
+                edge_color = "#2B7CE9" # Padrão azul para outros fluxos
+
+            net.add_edge(
+                source, 
+                target, 
+                title=op,
+                dashes=is_dashed,
+                color=edge_color,
+                width=1 if is_dashed else 2,
+                arrows='to' if not is_dashed else ''
+            )
 
     net.repulsion(node_distance=150, central_gravity=0.2, spring_length=100)
     net.show_buttons(filter_=['physics'])
 
     try:
-        # --- CORRIGIDO: Sanitizar nome do arquivo ---
-        file_id = "comm" # Default
+        file_id = "comm"
         if titulares_cpf:
-            # Remover caracteres inválidos do primeiro titular (ex: /, ., -)
             clean_cpf_cnpj = ''.join(filter(str.isalnum, titulares_cpf[0]))
             file_id = f"comm_{clean_cpf_cnpj}"
 
         suffix = f"_{file_id}.html"
-        # --- FIM CORREÇÃO ---
-
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode='w', encoding='utf-8') as tmpfile:
             net.save_graph(tmpfile.name)
             return tmpfile.name
     except Exception as e:
         st.error(f"Erro ao gerar visualização do grafo da comunicação: {str(e)}")
-        st.code(traceback.format_exc())
         return None
 
 # --- NOVO: Função para gerar Diagrama de Sankey ---
@@ -2083,17 +2080,16 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
 
     st.divider()
 
-    # 7. Narrativa e Fluxo Financeiro (Sankey)
-
+    # 7. Narrativa e Fluxo Financeiro (Sankey e Tabelas)
     st.subheader("📝 Informações Adicionais")
     st.info("⚠️ IMPORTANTE. Nunca usar LLM abertas para analisar esses dados.")
     narrativa = comunicacao_info.get('informacoesAdicionais', '')
     
+    
     if pd.notna(narrativa) and narrativa.strip() != '':
-        # Exibição do texto original
-        st.markdown(f"""<div style="height: 250px; overflow-y: auto; border: 1px solid #4C4E54; padding: 10px; border-radius: 5px; background-color: #1E1E1E; color: #EEE; margin-bottom: 20px;">{narrativa}</div>""", unsafe_allow_html=True)
-        
-        # Processamento de Nuvem e Termos
+        st.markdown(f'<div style="height: 200px; overflow-y: auto; border: 1px solid #4C4E54; padding: 10px; border-radius: 5px; background-color: #1E1E1E; color: #EEE; margin-bottom: 20px;">{narrativa}</div>', unsafe_allow_html=True)
+
+        #Processamento de Nuvem e Termos
         st.subheader("📝 Análise de Termos da Narrativa")
         with st.spinner("Analisando narrativa..."):
             wordcloud_img, df_fin_keywords, context_map = generate_word_cloud_and_keywords(narrativa)
@@ -2122,81 +2118,66 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
                 #else:
                 #    st.caption("Não foi possível encontrar contexto para os termos financeiros.")
 
-            # 6. Fluxo Financeiro (Sankey e Barras)
-            st.divider()
-            st.subheader("🌊 Resumo do Fluxo (Extraído do Texto)")
-            st.info("""
-                ⚠️ **IMPORTANTE:** É possível que esses dados estejam incompletos.  
-                Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.
-                """)
-            #st.info("⚠️ IMPORTANTE. É possível que esses dados estejam incompletos. \n\n  Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.")
-            df_cred, df_deb, df_cartao = extract_all_financial_data(narrativa)
+
+                        
+        st.divider()
+        st.subheader("🌊 Resumo do Fluxo Financeiro")
+        
+        # Tenta extrair dados via texto
+        df_cr, df_db, df_card = extract_all_financial_data(narrativa)
+        
+        # --- LÓGICA DE FALLBACK: Se a extração de texto falhar (DFs vazios) ---
+        if df_cr.empty and df_db.empty:
+            st.warning("⚠️ Não foi possível extrair automaticamente um fluxo financeiro das Informações Adicionais. Exibindo fluxo baseado nos papéis registrados.")
             
-            # Sankey
-            if not df_cred.empty or not df_deb.empty:
-                # Tenta pegar o nome do primeiro titular para o centro do gráfico
-                nome_alvo = titulares_df['nomeEnvolvido'].iloc[0] if not titulares_df.empty else "Titular"
-                fig_s = plot_sankey_fluxo(df_cred, df_deb, nome_alvo)
-                if fig_s:
-                    st.plotly_chart(fig_s, use_container_width=True, key=f"{key_prefix}_sankey_main_{selected_indexador}")
+            # Prepara dados sintéticos baseados nos papéis para o Sankey
+            df_env_rif = envolvidos_raw.copy()
+            df_env_rif['papel_clean'] = df_env_rif['tipoEnvolvido'].astype(str).str.lower().str.strip()
+            val_rif = comunicacao_info.get('ValorTotal', 0)
+            
+            # Sintetizar Origens (Incluindo Vendedores)
+            df_cred_sint = df_env_rif[df_env_rif['papel_clean'].isin(['remetente', 'depositante', 'vendedor'])].copy()
+            df_cred_sint = df_cred_sint.rename(columns={'nomeEnvolvido': 'Origem do Crédito'})
+            df_cred_sint['Valor (R$)'] = val_rif
+            
+            # Sintetizar Destinos (Incluindo Compradores)
+            df_deb_sint = df_env_rif[df_env_rif['papel_clean'].isin(['beneficiário', 'beneficiario', 'sacador', 'comprador'])].copy()
+            df_deb_sint = df_deb_sint.rename(columns={'nomeEnvolvido': 'Destino do Débito'})
+            df_deb_sint['Valor (R$)'] = val_rif
+            
+            if not df_cred_sint.empty or not df_deb_sint.empty:
+                alvo = titulares_df['nomeEnvolvido'].iloc[0] if not titulares_df.empty else "Titular"
+                fig_estruturado = plot_sankey_fluxo(df_cred_sint, df_deb_sint, alvo)
+                if fig_estruturado:
+                    st.plotly_chart(fig_estruturado, use_container_width=True, key=f"{key_prefix}_sankey_estrut_{selected_indexador}")
+        
+        else:
+            # --- CASO NORMAL: Texto extraído com sucesso ---
+            st.info("""
+            📊 Fluxo extraído automaticamente das Informações Adicionais.
+            
+            ⚠️ **IMPORTANTE:** É possível que esses dados estejam incompletos.  
+            Os valores aqui informados não substituem a análise mais detida do conteúdo do campo Informações Adicionais.
+            """)
+            alvo = titulares_df['nomeEnvolvido'].iloc[0] if not titulares_df.empty else "Titular"
+            fig_texto = plot_sankey_fluxo(df_cr, df_db, alvo)
+            if fig_texto:
+                st.plotly_chart(fig_texto, use_container_width=True, key=f"{key_prefix}_sankey_texto_{selected_indexador}")
 
-            # Gráficos de Barras
+            # Mostrar tabelas e barras de apoio APENAS se houver dados reais extraídos
+            if not df_cr.empty:
+                st.markdown("##### Principais Origens de Crédito")
+                st.dataframe(df_cr.sort_values('Valor (R$)', ascending=False), hide_index=True, use_container_width=True)
                 
-            st.markdown("##### Principais Origens de Crédito")
-            if not df_cred.empty:
-                # Ordenar por valor para exibição
-                df_cred = df_cred.sort_values('Valor (R$)', ascending=False)
-                st.dataframe(df_cred, width='stretch', hide_index=True,
-                column_config={
-                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                })
-                fig_cred = px.bar(df_cred.head(10), y='Origem do Crédito', x='Valor (R$)',
-                orientation='h', title='Top 10 Origens de Crédito',
-                labels={'Origem do Crédito': 'Origem', 'Valor (R$)': 'Valor Recebido (R$)'},
-                text='Valor (R$)', height=400)
-                fig_cred.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                fig_cred.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_cred, use_container_width=True, key=f"{key_prefix}_creditos_{selected_indexador}")                
-
-            st.markdown("##### Principais Destinos de Débito")
-            if not df_deb.empty:
-                # Ordenar por valor para exibição
-                df_deb = df_deb.sort_values('Valor (R$)', ascending=False)
-                st.dataframe(df_deb, width='stretch', hide_index=True,
-                column_config={
-                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                })
-                fig_deb = px.bar(df_deb.head(10), y='Destino do Débito', x='Valor (R$)',
-                orientation='h', title='Top 10 Destinos de Débito',
-                labels={'Destino do Débito': 'Destino', 'Valor (R$)': 'Valor Enviado (R$)'},
-                text='Valor (R$)', height=400)
-                fig_deb.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                fig_deb.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_deb, use_container_width=True, key=f"{key_prefix}_debitos_{selected_indexador}")
-
-            st.markdown("##### Principais Gastos no Cartão")
-            if not df_cartao.empty:
-                # Ordenar por valor para exibição
-                df_cartao = df_cartao.sort_values('Valor (R$)', ascending=False)
-                st.dataframe(df_cartao, width='stretch', hide_index=True,
-                column_config={
-                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Percentual (%)": st.column_config.NumberColumn(format="%.2f%%")
-                })
-                fig_card = px.bar(df_cartao.head(10), y='Estabelecimento', x='Valor (R$)',
-                orientation='h', title='Top 10 Gastos no Cartão de Crédito',
-                labels={'Estabelecimento': 'Estabelecimento', 'Valor (R$)': 'Valor Gasto (R$)'},
-                text='Valor (R$)', height=400)
-                fig_card.update_traces(texttemplate='R$ %{x:,.2f}', textposition='outside')
-                fig_card.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_card, use_container_width=True, key=f"{key_prefix}_cartao_{selected_indexador}")
-
-
+            if not df_db.empty:
+                st.markdown("##### Principais Destinos de Débito")
+                st.dataframe(df_db.sort_values('Valor (R$)', ascending=False), hide_index=True, use_container_width=True)
                 
+            if not df_card.empty:
+                st.markdown("##### Principais Gastos no Cartão")
+                st.dataframe(df_card.sort_values('Valor (R$)', ascending=False), hide_index=True, use_container_width=True)
     else:
-        st.info("Nenhuma narrativa disponível para análise nesta comunicação.")
+        st.info("Sem narrativa disponível para esta comunicação.")
 
         
 # ==============================================
