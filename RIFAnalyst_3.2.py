@@ -578,8 +578,8 @@ def plot_sankey_envolvido_estruturado(df_envolvido_full, selected_cpf, selected_
         for _, row in rif_data.iterrows():
             if row['cpfCnpjEnvolvido'] == selected_cpf: continue
             
-            tipo = 'Entrada' if row['tipoEnvolvido_Norm'] in ['REMETENTE', 'DEPOSITANTE', 'VENDEDOR'] else \
-                   'Saída' if row['tipoEnvolvido_Norm'] in ['BENEFICIARIO', 'SACADOR', 'COMPRADOR'] else None
+            tipo = 'Entrada' if row['tipoEnvolvido_Norm'] in ['REMETENTE', 'DEPOSITANTE', 'VENDEDOR', 'OUTORGANTE'] else \
+                   'Saída' if row['tipoEnvolvido_Norm'] in ['BENEFICIARIO', 'SACADOR', 'COMPRADOR', 'OUTORGADO'] else None
             
             if tipo:
                 fluxos.append({'Entidade': row['nomeEnvolvido'], 'Valor': v, 'Tipo': tipo})
@@ -1292,8 +1292,8 @@ def create_communication_graph(df_envolvidos_comunicacao):
             G_comm.nodes[node_id]['role'] = role.capitalize()
 
     # 3. Categorias para definição do tipo de linha (sólida vs tracejada)
-    financeiro_entrada = ['remetente', 'vendedor', 'depositante']
-    financeiro_saida = ['beneficiário', 'beneficiario', 'comprador', 'sacador']
+    financeiro_entrada = ['remetente', 'vendedor', 'depositante', 'outorgante']
+    financeiro_saida = ['beneficiário', 'beneficiario', 'comprador', 'sacador', 'outorgado']
     # Papéis que representam vínculo administrativo/legal, não necessariamente fluxo de caixa
     associativo = ['sócio', 'socio', 'procurador', 'representante', 'responsável', 'responsavel', 'outros', 'procurador / representante legal']
 
@@ -2136,12 +2136,12 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
             val_rif = comunicacao_info.get('ValorTotal', 0)
             
             # Sintetizar Origens (Incluindo Vendedores)
-            df_cred_sint = df_env_rif[df_env_rif['papel_clean'].isin(['remetente', 'depositante', 'vendedor'])].copy()
+            df_cred_sint = df_env_rif[df_env_rif['papel_clean'].isin(['remetente', 'depositante', 'vendedor', 'outorgante'])].copy()
             df_cred_sint = df_cred_sint.rename(columns={'nomeEnvolvido': 'Origem do Crédito'})
             df_cred_sint['Valor (R$)'] = val_rif
             
             # Sintetizar Destinos (Incluindo Compradores)
-            df_deb_sint = df_env_rif[df_env_rif['papel_clean'].isin(['beneficiário', 'beneficiario', 'sacador', 'comprador'])].copy()
+            df_deb_sint = df_env_rif[df_env_rif['papel_clean'].isin(['beneficiário', 'beneficiario', 'sacador', 'comprador', 'outorgado'])].copy()
             df_deb_sint = df_deb_sint.rename(columns={'nomeEnvolvido': 'Destino do Débito'})
             df_deb_sint['Valor (R$)'] = val_rif
             
