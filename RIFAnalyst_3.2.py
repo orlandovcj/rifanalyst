@@ -19,6 +19,7 @@ import openpyxl
 import string 
 import io
 import time
+import requests
 import indicadores as rif_ind
 
 # Inicializar contador de versão dos widgets para limpeza total
@@ -349,7 +350,6 @@ def normalize_string(text):
         except:
              return "ERRO_NORMALIZACAO"
 
-
 @st.cache_data
 def analyze_individual_network(df_full, selected_cpf):
     """Realiza análise de redes DIRECIONAL (DiGraph) para UM envolvido e suas conexões diretas,
@@ -609,7 +609,6 @@ def plot_sankey_envolvido_estruturado(df_envolvido_full, selected_cpf, selected_
     )])
     fig.update_layout(title_text=f"Fluxo Financeiro Filtrado (Top {top_n}): {selected_nome}", font_size=10, height=600)
     return fig
-
 
 # --- NOVO: Função para simplificar o grafo individual ---
 def simplify_graph(G_original, central_node):
@@ -1649,19 +1648,61 @@ def extract_all_financial_data(text):
 
         return credits, debits, []
 
-    # --- PARSER 1: SANTANDER ---
+    # --- PARSER 1: SANTANDER (v15.0 - Híbrido: Amostral + Hierárquico) ---
     def _parse_santander_style(txt):
-        # ... (Código mantido v12.0) ...
         credits, debits = [], []
-        re_santander = re.compile(r"-\s*(?P<name>.+?)\s+-\s+(?:CNPJ|CPF):\s*(?P<doc>[\d./-]+).*?Valor (?:Recebido|Enviado):\s*R\$(?P<val>[\d.,]+)", re.IGNORECASE)
-        match_cred = re.search(r"Principais remetentes/depositantes identificados:(.*?)(?=Resumo de lancamentos a debito|Principais destinatarios|$)", txt, re.IGNORECASE | re.DOTALL)
+        
+        # Normalização de caracteres de tópicos comuns em RIFs
+        txt = txt.replace('•', '•').replace('º', 'o')
+
+        # REGEX A: Padrão Amostral (v14.0 - com hífens)
+        re_amostral = re.compile(
+            r"-\s*(?P<name>.+?)\s+-\s+(?:CNPJ|CPF):\s*(?P<doc>[\d./-]+)\s*-\s*"
+            r"Valor (?:Recebido|Enviado):\s*R\$\s*(?P<val>[\d.,]+)"
+            r"(?:\s*,\s*sendo:\s*(?P<details>.*?))?(?=\s*-|$)", re.IGNORECASE | re.DOTALL
+        )
+
+        # REGEX B: Padrão Hierárquico (v15.0 - o novo formato que você enviou)
+        # Captura: R$ 4.127.156,00 em 9 TEDs ordenadas por J BADIM S.A CNPJ: 27901222000131
+        re_hierarquico = re.compile(
+            r"R\$\s*(?P<val>[\d.,]+)\s+em\s+(?P<qtd>\d+)\s+.*?" # Valor e Qtd
+            r"(?:por|para|emitido por)\s+(?P<name>.*?)\s+"     # Conector e Nome
+            r"(?P<doc_type>CNPJ|CPF):\s*(?P<doc>[\d./-]+)",    # Documento
+            re.IGNORECASE
+        )
+
+        def extract_qtd_local(details_str, fallback_qtd=1):
+            if not details_str: return fallback_qtd
+            match_qtd = re.search(r"(\d+)\s+(?:PIX|TEV|DOC|TED|trans|lanç)", str(details_str), re.IGNORECASE)
+            return int(match_qtd.group(1)) if match_qtd else fallback_qtd
+
+        # --- SEÇÃO DE CRÉDITOS ---
+        match_cred = re.search(
+            r"(?:Total Credito:|Principais remetentes|contrapartes.*?credito).*?:(.*?)"
+            r"(?=Total Debito:|Resumo de lancamentos a debito|contrapartes.*?debito|$)", 
+            txt, re.IGNORECASE | re.DOTALL
+        )
         if match_cred:
-            for match in re_santander.finditer(match_cred.group(1)):
-                credits.append({'Origem do Crédito': match.group('name').strip().upper(), 'Valor (R$)': clean_value(match.group('val')), 'Qtd Transações': 1, 'Detalhe': f"Doc: {match.group('doc')}"})
-        match_deb = re.search(r"Principais destinatarios de recursos identificados:(.*?)(?=Ao analisar|Conclusao|Informa|$)", txt, re.IGNORECASE | re.DOTALL)
+            block = match_cred.group(1)
+            # Tenta os dois padrões no bloco de crédito
+            for m in re_amostral.finditer(block):
+                credits.append({'Origem do Crédito': m.group('name').strip().upper(), 'Valor (R$)': clean_value(m.group('val')), 'Qtd Transações': extract_qtd_local(m.group('details')), 'Detalhe': f"CNPJ/CPF: {m.group('doc')}"})
+            for m in re_hierarquico.finditer(block):
+                credits.append({'Origem do Crédito': m.group('name').strip().upper(), 'Valor (R$)': clean_value(m.group('val')), 'Qtd Transações': int(m.group('qtd')), 'Detalhe': f"CNPJ/CPF: {m.group('doc')}"})
+
+        # --- SEÇÃO DE DÉBITOS ---
+        match_deb = re.search(
+            r"(?:Total Debito:|Principais destinatarios|contrapartes.*?debito).*?:(.*?)"
+            r"(?=Informacoes adicionais|Ao analisar|Conclusao|Conforme formulario|$)", 
+            txt, re.IGNORECASE | re.DOTALL
+        )
         if match_deb:
-            for match in re_santander.finditer(match_deb.group(1)):
-                debits.append({'Destino do Débito': match.group('name').strip().upper(), 'Valor (R$)': clean_value(match.group('val')), 'Qtd Transações': 1, 'Detalhe': f"Doc: {match.group('doc')}"})
+            block = match_deb.group(1)
+            for m in re_amostral.finditer(block):
+                debits.append({'Destino do Débito': m.group('name').strip().upper(), 'Valor (R$)': clean_value(m.group('val')), 'Qtd Transações': extract_qtd_local(m.group('details')), 'Detalhe': f"CNPJ/CPF: {m.group('doc')}"})
+            for m in re_hierarquico.finditer(block):
+                debits.append({'Destino do Débito': m.group('name').strip().upper(), 'Valor (R$)': clean_value(m.group('val')), 'Qtd Transações': int(m.group('qtd')), 'Detalhe': f"CNPJ/CPF: {m.group('doc')}"})
+        
         return credits, debits, []
 
     # --- PARSER 2: BRADESCO ---
@@ -2179,7 +2220,80 @@ def render_analise_comunicacao(selected_indexador: str, key_prefix: str = "comm"
     else:
         st.info("Sem narrativa disponível para esta comunicação.")
 
+def fetch_portal_transparencia_data(cpf_cnpj, data_inicio, data_fim):
+    """
+    Consulta pagamentos no Portal da Transparência tratando o formato da resposta (list vs dict).
+    """
+    # 1. Limpeza rigorosa do ID (apenas números)
+    id_limpo = ''.join(filter(str.isdigit, str(cpf_cnpj)))
+    
+    # 2. Usando o endpoint que funcionou no seu teste de terminal
+    url = "https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido"
+    
+    # 3. Headers em formato de DICIONÁRIO (Crucial para evitar erro de 'list')
+    try:
+        token = st.secrets["portal_transparencia_token"]
+    except:
+        st.error("Chave da API não encontrada no arquivo secrets.toml")
+        return pd.DataFrame()
+
+    headers = {
+        "accept": "*/*",
+        "chave-api-dados": token.strip() # .strip() remove espaços acidentais
+    }
+    
+    # 4. Parâmetros idênticos aos do teste (usando codigoPessoa e ano)
+    params = {
+        "codigoPessoa": id_limpo,
+        "fase": "3",  # Fase de Pagamento
+        "ano": str(data_inicio.year), # O teste usou o ano fixo
+        "pagina": "1"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
         
+        if response.status_code == 200:
+            dados_brutos = response.json()
+            
+            # Converte para DataFrame tratando a lista de forma segura
+            if isinstance(dados_brutos, list):
+                if not dados_brutos:
+                    return pd.DataFrame()
+                return pd.DataFrame(dados_brutos)
+            return pd.DataFrame([dados_brutos])
+            
+        elif response.status_code == 403:
+            st.error(f"Erro 403: Acesso negado. A chave '{token[:5]}...' pode estar inválida para este endpoint.")
+            return pd.DataFrame()
+        else:
+            st.error(f"API retornou erro {response.status_code}: {response.text}")
+            return pd.DataFrame()
+            
+    except Exception as e:
+        st.error(f"Falha na integração: {str(e)}")
+        return pd.DataFrame()
+        
+
+def limpar_valor_portal(v):
+    """
+    Limpa strings de valores do Portal da Transparência (padrão BR) 
+    tratando espaços, pontos de milhar e sinais de negativo.
+    """
+    if pd.isna(v) or v == "" or v == "N/A": 
+        return 0.0
+    
+    # 1. Converte para string e remove espaços (corrige o erro do '- 2450.00')
+    s = str(v).strip().replace(' ', '')
+    
+    # 2. Inverte separadores: remove o ponto de milhar e troca vírgula por ponto decimal
+    s = s.replace('.', '').replace(',', '.')
+    
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
 # ==============================================
 # INTERFACE PRINCIPAL
 # ==============================================
@@ -2353,9 +2467,11 @@ if process_button and file_ocorrencias and file_envolvidos and file_comunicacoes
             st.session_state.df_ocorrencias = df_ocorrencias_raw
             st.session_state.df_envolvidos = df_envolvidos_raw
             st.session_state.df_comunicacoes = df_comunicacoes # Pré-processado com Valores
-            st.session_state.data_loaded = True
-            st.success("Dados processados com sucesso!")
-            # st.balloons() # Opcional: Efeito visual de sucesso
+            st.session_state.data_loaded = True                        
+            st.session_state.df_display = df_final_merged
+                      
+            
+            st.success("Processamento concluído com sucesso!")
             st.rerun()
 
         except Exception as e:
@@ -2529,15 +2645,13 @@ if st.session_state.data_loaded:
 
     # --- Criação das Abas ---
     #tab_geral, tab_patterns, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
-    tab_geral, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network, tab_pagamentos = st.tabs([
+    tab_geral, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_pagamentos = st.tabs([
         "📊 Análise Geral",
-        #"⚠️ Padrões Suspeitos",
         "🏆 Ranking de Envolvidos",
         "👤 Análise Individual Detalhada",
         "💬 Ranking de Comunicações",
         "🔎 Análise por Comunicação",
-        "🌐 Análise de Rede Individual",
-        "🔍 Diligência Automática - Portal da Transparência",
+        "🔍 Pagamentos - Portal da Transparência",
 
     ])
 
@@ -3068,195 +3182,221 @@ if st.session_state.data_loaded:
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Nenhum dado corresponde aos filtros selecionados para a Análise Geral.")
-    
-#''' NOTA: A ABA DE PADRÕES SUSPEITOS FOI INTEGRADA AO RANKING DE ENVOLVIDOS PARA SIMPLIFICAR
-##        MANTEMOS O CÓDIGO AQUI APENAS PARA REFERÊNCIAS FUTURAS
-#        
-#    # --- Conteúdo da Aba 2: Padrões Suspeitos ---
-#    with tab_patterns:
-#        st.header("⚠️ Padrões Suspeitos (Baseado nos Dados Filtrados)")
-#
-#        if not df_display.empty:
-#            with st.spinner("Analisando padrões suspeitos e calculando scores..."):
-#                suspicious_df_filtered = analyze_suspicious_patterns(
-#                    df_display,
-#                    st.session_state.df_ocorrencias,
-#                    st.session_state.df_comunicacoes,
-#                    st.session_state.df_envolvidos
-#                )
-#
-#            if suspicious_df_filtered is not None and not suspicious_df_filtered.empty:
-#                # --- NOVO: Placar de Risco (Scoring) ---
-#                st.subheader("🔥 Ranking de Risco dos Envolvidos")
-#
-#                # Definir pesos para os riscos
-#                risk_weights = {'Crítico': 10, 'Alto': 5, 'Moderado': 2, 'Baixo': 1}
-#
-#                # Calcular score
-#                score_df = suspicious_df_filtered.copy()
-#                score_df['Pontos'] = score_df['Risco'].map(risk_weights).fillna(1)
-#
-#                # Agrupar por CPF/CNPJ e Nome
-#                ranking = score_df.groupby(['cpfCnpj', 'Nome']).agg(
-#                    Score_Total=('Pontos', 'sum'),
-#                    Qtd_Alertas=('Motivo', 'count'),
-#                    Tipos_Risco=('Risco', lambda x: list(x.unique()))
-#                ).reset_index()
-#
-#                # Filtrar 'N/A' e ordenar
-#                ranking = ranking[~ranking['cpfCnpj'].str.contains('N/A', na=False)]
-#                ranking = ranking.sort_values('Score_Total', ascending=False).head(20) # Top 20
-#
-#                # Exibir Tabela de Ranking
-#                st.dataframe(
-#                    ranking,
-#                    width='stretch',
-#                    hide_index=True,
-#                    column_config={
-#                        "cpfCnpj": "CPF/CNPJ",
-#                        "Score_Total": st.column_config.ProgressColumn("Score de Risco", format="%d", min_value=0, max_value=int(ranking['Score_Total'].max() * 1.2)),
-#                        "Qtd_Alertas": "Qtd. Alertas",
-#                        "Tipos_Risco": "Níveis Detectados"
-#                    }
-#                )
-#                st.divider()
-#                # --- FIM NOVO ---
-#
-#                st.subheader("Detalhe dos Padrões Identificados")
-#
-#                # Correção para Arrow (string conversion)
-#                suspicious_df_display = suspicious_df_filtered.copy()
-#                if 'Indexador' in suspicious_df_display.columns:
-#                    suspicious_df_display['Indexador'] = suspicious_df_display['Indexador'].astype(str)
-#                if 'idComunicacao' in suspicious_df_display.columns:
-#                    suspicious_df_display['idComunicacao'] = suspicious_df_display['idComunicacao'].astype(str)
-#
-#                st.dataframe(
-#                    suspicious_df_display,
-#                    width='stretch',
-#                    column_config={
-#                        "Indexador": st.column_config.TextColumn("Indexador", width="medium"),
-#                        "idComunicacao": st.column_config.TextColumn("ID Com.", width="medium"),
-#                        "cpfCnpj": st.column_config.TextColumn("CPF/CNPJ", width="medium"),
-#                        "Nome": st.column_config.TextColumn("Nome", width="large"),
-#                        "Motivo": st.column_config.TextColumn("Motivo", width="large"),
-#                        "Risco": st.column_config.TextColumn("Risco", width="small")
-#                    },hide_index=True
-#                )
-#
-#                # Gráfico de distribuição de riscos
-#                risk_counts = suspicious_df_filtered['Risco'].value_counts().reset_index()
-#                risk_counts.columns = ['Risco', 'Contagem']
-#                fig = px.bar(risk_counts, x='Risco', y='Contagem', title="Distribuição dos Níveis de Risco",
-#                             color='Risco', color_discrete_map={'Alto': '#FF6B6B', 'Crítico': '#D00000', 'Moderado': '#FFB703'},
-#                             category_orders={"Risco": ["Moderado", "Alto", "Crítico"]}
-#                            )
-#                st.plotly_chart(fig, use_container_width=True)
-#            else:
-#                st.info("Nenhum padrão suspeito detectado nos dados que correspondem aos filtros selecionados.")
-#        else:
-#            st.info("Nenhum dado para analisar padrões (verifique filtros).")
-#'''
-    
-    # --- Conteúdo da Aba 3: Análise de Rede Individual ---
-    with tab_network:
-        st.header("🌐 Análise de Rede Individual")
-        st.info("Selecione um envolvido abaixo para visualizar sua rede de conexões diretas (baseado nos dados filtrados).")
+  
+ # --- Conteúdo da Aba 2: Ranking de Envolvidos (ATUALIZADO COM TRIAGEM AUTOMÁTICA) ---
+    with tabranking:
+        st.header("🏆 Ranking de Risco Consolidado")
+        st.caption("O Score Total soma pontos de indicadores matemáticos e padrões suspeitos detectados.")
+        
+        # --- SEÇÃO DE AJUDA MANTIDA ---
+        with st.expander("❓ Como é calculado o score de risco"):
+            st.markdown("""
+            ### **🛡️ Entenda o Cálculo do Score de Risco**
 
-        selected_option_net = st.selectbox(
-            "Selecione um Envolvido para Análise de Rede:",
-            options=options_envolvidos,
-            key='select_network'
-        )
+            O **Score Total** é o motor de inteligência do sistema. Ele combina a **análise qualitativa** (o comportamento descrito nas ocorrências e narrativas) com a **análise quantitativa** (indicadores matemáticos extraídos da massa de dados).
 
-        selected_cpf_network = None
-        if selected_option_net != "Selecione...":
-            try: selected_cpf_network = selected_option_net.split('(')[-1].strip(')')
-            except IndexError: selected_cpf_network = None
+            ---
 
-        if selected_cpf_network:
-            st.subheader(f"Rede de Conexões para: {selected_option_net}")
-            if not df_display.empty:
-                with st.spinner(f"Construindo rede completa para {selected_cpf_network}..."):
-                    # Chamar a função original que retorna G, partição e contagem de arestas
-                    G_sub_completo, partition_completa_dict, edge_count_completo = analyze_individual_network(df_display, selected_cpf_network)
+            ### **1. Padrões Qualitativos (Alertas e Ocorrências)**
 
-                if G_sub_completo is not None and G_sub_completo.number_of_nodes() > 0:
+            Estes pontos são extraídos das narrativas (`informacoesAdicionais`) e dos códigos oficiais de ocorrência (`idOcorrencia`), classificados conforme a gravidade:
 
-                    # --- LÓGICA DE ESCOLHA E EXIBIÇÃO ---
-                    st.divider() # Separador visual
+            * **🔴 Crítico (10 pts):** Fortes indícios de lavagem de dinheiro ou tentativa de burla.
+            * **Fragmentação (Smurfing):** Divisão de valores para evitar reporte automático (Ex: IDs 1011, 1012, 1013, 1020).
+            * **Ocultação:** Artifícios para burla de identificação de origem ou destino (Ex: ID 1056).
+            * **Perfil Sensível:** Movimentação atípica em espécie envolvendo PEPs (Ex: IDs 1063, 1021).
+            * **Gravidade Direta:** Indícios de ilícitos citados pela SUSEP (1207) ou envio para jurisdições de risco (1110, 1164, 1189).
 
-                    # Definir opção padrão com base na contagem de arestas
-                    default_view_index = 1 if edge_count_completo > MAX_CONEXOES_REDE else 0 # 0: Completo, 1: Simplificado
-                    view_choice = st.radio(
-                        "Selecione o tipo de visualização:",
-                        ("Completo", "Simplificado (Nó central + Vizinhos diretos)"),
-                        index=default_view_index,
-                        key=f"view_choice_{selected_cpf_network}",
-                        horizontal=True
-                    )
-                    if edge_count_completo > MAX_CONEXOES_REDE:
-                         st.warning(f"A rede completa possui {edge_count_completo} conexões, o que pode tornar a visualização lenta. A visualização simplificada foi pré-selecionada.")
+            * **🟠 Alto (5 pts):** Desvios significativos que sugerem atipicidade financeira.
+            * **Incompatibilidade:** Movimentação superior ao patrimônio ou faturamento declarado (Ex: IDs 1045, 1073).
+            * **Contas de Passagem:** Recebimento de créditos com imediato débito (Pass-through) (Ex: ID 1074).
+            * **Espécie em Vulto:** Depósitos ou saques em espécie  R$ 50 mil (Ex: IDs 1161, 1162, 1163).
+            * **Risco Operacional:** Operações em zonas de mineração ou fronteira (Ex: IDs 1157, 1158).
 
-                    # Definir qual grafo e partição usar
-                    G_to_visualize = None
-                    partition_to_visualize = {}
-                    displaying_simplified = False
+            * **🟡 Moderado (2 pts):** Sinais comportamentais que indicam necessidade de vigilância.
+            * **Contas Recém-abertas:** Operações relevantes em contas com menos de 30 dias.
+            * **Uso de Terceiros:** Movimentação por procuradores ou representação de múltiplas empresas (Ex: IDs 1034, 1038).
+            * **Inconsistência Cadastral:** Uso do mesmo e-mail ou IP por pessoas distintas (Ex: ID 1042).
 
-                    if view_choice == "Simplificado":
-                        displaying_simplified = True
-                        with st.spinner("Gerando grafo simplificado..."):
-                            G_to_visualize = simplify_graph(G_sub_completo, selected_cpf_network)
-                            # Recalcular partição para o grafo simplificado (opcional, pode ser rápido o suficiente)
-                            if G_to_visualize.number_of_nodes() > 0:
-                                try:
-                                    undirected_simple = G_to_visualize.to_undirected()
-                                    if undirected_simple.number_of_edges() > 0:
-                                        partition_to_visualize = community_louvain.best_partition(undirected_simple)
-                                    else:
-                                         partition_to_visualize = {node: i for i, node in enumerate(undirected_simple.nodes())}
-                                except Exception as e:
-                                     st.warning(f"Não foi possível calcular comunidades para grafo simplificado: {e}")
-                                     partition_to_visualize = {node: 0 for node in G_to_visualize.nodes()}
-                    else: # Escolheu Completo
-                        G_to_visualize = G_sub_completo
-                        partition_to_visualize = partition_completa_dict # Usar a partição já calculada
+            ---
 
-                    # Exibir Métricas (baseadas no grafo que será visualizado)
-                    st.subheader("Métricas da Rede Exibida")
-                    col1_net, col2_net, col3_net = st.columns(3)
-                    node_count_display = G_to_visualize.number_of_nodes() if G_to_visualize else 0
-                    edge_count_display = G_to_visualize.number_of_edges() if G_to_visualize else 0
-                    community_count_display = len(set(partition_to_visualize.values())) if partition_to_visualize else 0
+            ### **2. Indicadores Matemáticos (Métricas de Massa)**
 
-                    col1_net.metric("Nós na Rede Exibida", node_count_display)
-                    col2_net.metric("Conexões Exibidas", edge_count_display)
-                    col3_net.metric("Comunidades (Rede Exibida)", community_count_display)
+            Cálculos estatísticos aplicados sobre todo o histórico do envolvido no RIF:
 
+            * **HHI (Concentração):** O *Índice de Herfindahl-Hirschman* mede o nível de dispersão dos recursos. Um HHI alto indica que o dinheiro está concentrado em pouquíssimas contrapartes (típico de contas-âncora).
+            * **Fracionamento Temporal:** Identifica dias específicos com 3 ou mais operações simultâneas, um forte sinalizador de fracionamento de valores.
+            * **Proximidade de Limites:** Monitora operações que "orbitam" entre 90% e 99% do limite de reporte (R$ 50 mil), sugerindo tentativa de evitar o radar regulatório.
 
-                    # Visualização do grafo selecionado (G_to_visualize)
-                    if G_to_visualize is not None and G_to_visualize.number_of_nodes() > 0:
-                        graph_type_msg = "simplificada" if displaying_simplified else "completa"
-                        with st.spinner(f"Renderizando visualização {graph_type_msg}..."):
-                            network_file_sub = visualize_network(G_to_visualize, partition_to_visualize, selected_cpf_network)
+            ---
 
-                        if network_file_sub:
-                            st.components.v1.html(open(network_file_sub, 'r', encoding='utf-8').read(), height=800)
-                            st.html(generate_network_legend())
+            ### **3. Regra de Consolidação do Score**
 
-                        else:
-                            st.warning(f"Não foi possível gerar a visualização da rede {graph_type_msg}.")
-                    else:
-                         st.info("O grafo selecionado está vazio.")
+            A pontuação final que define o lugar do envolvido no **Ranking** é calculada assim:
 
+            | Componente | Regra de Pontuação |
+            | --- | --- |
+            | **Soma Qualitativa** | Total de pontos acumulados por todos os alertas detectados. |
+            | **Bônus de Perfil** | **+5 pts** para cada flag confirmada (PEP, Servidor ou Pessoa Obrigada). |
+            | **Bônus HHI** | **+10 pts** fixos se o índice de concentração for superior a 0.6. |
+            | **Bônus de Frequência** | **+2 pts** para cada dia identificado com fracionamento temporal. |
+
+            ---
+
+            **💡 Dica de Análise:** Um Score alto vindo de indicadores matemáticos sugere uma conta estrutural (passagem), enquanto um Score alto vindo de padrões qualitativos sugere uma irregularidade comportamental específica.
+
+            """)
+
+        if "df_final" in st.session_state:
+            with st.spinner("Consolidando Score de Risco e realizando triagem pública..."):
+                # A. Indicadores Matemáticos
+                df_env_math = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
+                
+                # B. Alertas Qualitativos
+                df_alertas_brutos = analyze_suspicious_patterns(
+                    df_display, st.session_state.df_ocorrencias,
+                    st.session_state.df_comunicacoes, st.session_state.df_envolvidos
+                )
+
+                # C. Cruzamento de Dados e Cálculo do Score
+                if not df_alertas_brutos.empty:
+                    df_resumo_alertas = df_alertas_brutos.groupby('cpfCnpj').agg(
+                        Score_Quali=('Pontos', 'sum'),
+                        Qtd_Alertas=('Motivo', 'count')
+                    ).reset_index()
+                    df_ranking = pd.merge(df_env_math, df_resumo_alertas, left_on='cpfCnpjEnvolvido', right_on='cpfCnpj', how='left').fillna(0)
                 else:
-                    st.info("Nenhuma conexão encontrada para este envolvido nos dados filtrados.")
-            else:
-                 st.info("Não há dados filtrados para construir a rede.")
-        else:
-            st.info("Selecione um envolvido acima.")
+                    df_ranking = df_env_math.assign(Score_Quali=0, Qtd_Alertas=0)
 
-    # --- Conteúdo da Aba 4: Análise Individual Detalhada ---
+                # D. Aplicação das Regras de Score
+                df_ranking['ScoreTotal'] = df_ranking['Score_Quali']
+                df_ranking['ScoreTotal'] += df_ranking['flag_pep'].astype(int) * 5
+                df_ranking['ScoreTotal'] += df_ranking['flag_servidor'].astype(int) * 5
+                df_ranking['ScoreTotal'] += (df_ranking['hhi_contrapartes'] > 0.6).astype(int) * 10
+                df_ranking['ScoreTotal'] += df_ranking['fracionamento_dias_com_3+_ops'] * 2
+
+                df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
+
+                # --- Triagem Automática Corrigida (Usa o Top 30 do Score Total) ---
+                if not st.session_state.get('alerts_processed', False):
+                    # Pegamos o Top 30 baseado no ScoreTotal calculado acima
+                    top_30_alvos = df_ranking.head(30)
+                    
+                    if 'cpfs_com_alerta_publico' not in st.session_state:
+                        st.session_state.cpfs_com_alerta_publico = set()
+
+                    with st.status("🏛️ Triagem Pública: Verificando Top 30 no Portal...") as status:
+                        progresso = st.progress(0)
+                        total = len(top_30_alvos)
+                        
+                        for i, (idx, row) in enumerate(top_30_alvos.iterrows()):
+                            # Limpeza para consulta e armazenamento
+                            doc = ''.join(filter(str.isdigit, str(row['cpfCnpjEnvolvido'])))
+                            
+                            if doc:
+                                hoje = pd.Timestamp.now()
+                                res = fetch_portal_transparencia_data(doc, hoje - pd.Timedelta(days=365), hoje)
+                                
+                                if not res.empty:
+                                    res['v_temp'] = res['valor'].apply(limpar_valor_portal)
+                                    if res['v_temp'].sum() != 0:
+                                        st.session_state.cpfs_com_alerta_publico.add(doc)
+                            
+                            progresso.progress((i + 1) / total)
+                        
+                        st.session_state.alerts_processed = True
+                        status.update(label="✅ Triagem concluída!", state="complete")
+                        st.rerun() # Atualiza a tela para mostrar os ícones injetados
+
+                # E. Injeção do Ícone (Comparação Numérica Pura)
+                def formatar_nome_alerta(row):
+                    doc_limpo = ''.join(filter(str.isdigit, str(row['cpfCnpjEnvolvido'])))
+                    alerta_set = st.session_state.get('cpfs_com_alerta_publico', set())
+                    
+                    if doc_limpo in alerta_set:
+                        nome = str(row['nomeEnvolvido'])
+                        return f"🏛️ {nome}" if "🏛️" not in nome else nome
+                    return row['nomeEnvolvido']
+
+                df_ranking['nomeEnvolvido'] = df_ranking.apply(formatar_nome_alerta, axis=1)
+                
+                # Formatação final da tabela
+                df_ranking.insert(0, "Pos.", range(1, len(df_ranking) + 1))
+                st.subheader("Classificação de Risco")
+                st.caption("🏛️ Indica envolvidos com pagamentos identificados no Portal da Transparência.")
+                
+                df_to_show = df_ranking[["Pos.", "cpfCnpjEnvolvido", "nomeEnvolvido", "n_comunicacoes", "ScoreTotal", "valor_total"]].head(100)
+
+                df_styled = df_to_show.style.format({
+                    "valor_total": lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                })
+
+                sel_rank = st.dataframe(
+                    df_styled,
+                    use_container_width=True, 
+                    hide_index=True,
+                    on_select="rerun", 
+                    selection_mode="single-row", 
+                    key="rank_table_select",
+                    column_config={
+                        "nomeEnvolvido": st.column_config.TextColumn("Nome do Envolvido", width="large"),
+                        "ScoreTotal": st.column_config.ProgressColumn(
+                            "Score", format="%d pts", min_value=0, max_value=int(df_ranking['ScoreTotal'].max())
+                        )
+                    }
+                )
+
+                # F. Gráfico de Dispersão
+                fig_risk = px.scatter(df_ranking.head(30), x='valor_total', y='ScoreTotal', size='ScoreTotal', color='ScoreTotal',
+                                     hover_name='nomeEnvolvido', title="Dispersão: Valor vs Score")
+                st.plotly_chart(fig_risk, use_container_width=True)
+
+                # G. DETALHAMENTO AO SELECIONAR (Tabela solicitada)
+                selection = sel_rank.get("selection", {}).get("rows", [])
+                if selection:
+                    row_idx = selection[0]
+                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
+                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
+
+                    st.markdown("---")
+                    # Exibe a tabela de padrões identificados
+                    st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
+                    
+                    detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
+                    if not detalhes_alvo.empty:
+                        st.dataframe(
+                            detalhes_alvo[['Indexador', 'idComunicacao', 'Motivo', 'Risco']],
+                            use_container_width=True, hide_index=True,
+                            column_config={"Motivo": st.column_config.TextColumn("Descrição do Alerta", width="large")}
+                        )
+                    else:
+                        st.info("Este alvo possui score baseado apenas em indicadores matemáticos (HHI, PEP ou Volume).")
+
+                # H. Detalhamento de Fluxo e Padrões ao Selecionar Linha
+                selection = sel_rank.get("selection", {}).get("rows", [])
+                if selection:
+                    row_idx = selection[0]
+                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
+                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
+
+                    st.markdown("---")
+                    st.subheader(f"🔍 Análise de Fluxo Estruturado: {sel_nome}")
+                    
+                    # --- Análise de Fluxo (Aba Ranking) ---
+                    col_rf1, col_rf2 = st.columns(2)
+                    with col_rf1:
+                        v_min_rank = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"rank_vmin_{sel_cpf}")
+                    with col_rf2:
+                        n_links_rank = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"rank_nlinks_{sel_cpf}")
+                    
+                    with st.spinner("Gerando diagrama..."):
+                        fig_sankey_rank = plot_sankey_envolvido_estruturado(df_display, sel_cpf, sel_nome, min_value=v_min_rank, top_n=n_links_rank)
+                        if fig_sankey_rank:
+                            st.plotly_chart(fig_sankey_rank, use_container_width=True, key=f"plot_sankey_rank_{sel_cpf}")
+                        else:
+                            st.info("Não há vínculos estruturados suficientes para este alvo nos RIFs filtrados.")
+   
+    # --- Conteúdo da Aba 3: Análise Individual Detalhada ---
     with tab_individual:
         st.header("👤 Análise Individual Detalhada")
 
@@ -3417,221 +3557,7 @@ if st.session_state.data_loaded:
         else:
             st.info("Selecione um envolvido acima para ver os detalhes.")
 
-    # --- Conteúdo da Aba 5: Análise por Comunicação ---
-    with tab_comunicacao:
-        st.header("🔎 Análise por Comunicação (Indexador)")
-
-        # Verificar se os dataframes base existem
-        if 'df_comunicacoes' not in st.session_state or st.session_state.df_comunicacoes is None or \
-           'df_envolvidos' not in st.session_state or st.session_state.df_envolvidos is None or \
-           'df_ocorrencias' not in st.session_state or st.session_state.df_ocorrencias is None:
-            st.warning("DataFrames base não estão carregados no estado da sessão.")
-        else:
-            # Pegar lista de Indexadores únicos do df_comunicacoes original para garantir que todos estejam disponíveis
-            lista_indexadores = ["Selecione..."] + sorted(st.session_state.df_comunicacoes['Indexador'].unique().tolist())
-
-            default_index = 0 # Padrão é "Selecione..."
-            jump_indexador = st.session_state.get('jump_target_indexador', None)
-            if jump_indexador and jump_indexador in lista_indexadores:
-                try:
-                    default_index = lista_indexadores.index(jump_indexador)
-                except ValueError:
-                    default_index = 0 # Mantém padrão se não encontrar por algum motivo
-
-            selected_indexador = st.selectbox(
-                "Selecione o Indexador da Comunicação:",
-                options=lista_indexadores,
-                index=default_index, # Usa o índice calculado
-                key='select_indexador'
-            )
-
-            if jump_indexador:
-                st.session_state.jump_target_indexador = None
-                st.session_state.trigger_jump = False
-
-            if selected_indexador != "Selecione...":
-                # Chama a função mestre com prefixo exclusivo para esta aba
-                render_analise_comunicacao(selected_indexador, key_prefix="aba_comunicacao")
-            else:
-                 st.info("Selecione um Indexador na lista acima para ver os detalhes.")
-
-    # --- Conteúdo da Aba 6: Ranking de Envolvidos (INTERATIVO) ---
-    with tabranking:
-        st.header("🏆 Ranking de Risco Consolidado")
-        st.caption("O Score Total soma pontos de indicadores matemáticos e padrões suspeitos detectados.")
-        # --- SEÇÃO DE AJUDA SOLICITADA ---
-        with st.expander("❓ Como é calculado o score de risco"):
-            st.markdown("""
-            ### **🛡️ Entenda o Cálculo do Score de Risco**
-
-            O **Score Total** é o motor de inteligência do sistema. Ele combina a **análise qualitativa** (o comportamento descrito nas ocorrências e narrativas) com a **análise quantitativa** (indicadores matemáticos extraídos da massa de dados).
-
-            ---
-
-            ### **1. Padrões Qualitativos (Alertas e Ocorrências)**
-
-            Estes pontos são extraídos das narrativas (`informacoesAdicionais`) e dos códigos oficiais de ocorrência (`idOcorrencia`), classificados conforme a gravidade:
-
-            * **🔴 Crítico (10 pts):** Fortes indícios de lavagem de dinheiro ou tentativa de burla.
-            * **Fragmentação (Smurfing):** Divisão de valores para evitar reporte automático (Ex: IDs 1011, 1012, 1013, 1020).
-            * **Ocultação:** Artifícios para burla de identificação de origem ou destino (Ex: ID 1056).
-            * **Perfil Sensível:** Movimentação atípica em espécie envolvendo PEPs (Ex: IDs 1063, 1021).
-            * **Gravidade Direta:** Indícios de ilícitos citados pela SUSEP (1207) ou envio para jurisdições de risco (1110, 1164, 1189).
-
-            * **🟠 Alto (5 pts):** Desvios significativos que sugerem atipicidade financeira.
-            * **Incompatibilidade:** Movimentação superior ao patrimônio ou faturamento declarado (Ex: IDs 1045, 1073).
-            * **Contas de Passagem:** Recebimento de créditos com imediato débito (Pass-through) (Ex: ID 1074).
-            * **Espécie em Vulto:** Depósitos ou saques em espécie  R$ 50 mil (Ex: IDs 1161, 1162, 1163).
-            * **Risco Operacional:** Operações em zonas de mineração ou fronteira (Ex: IDs 1157, 1158).
-
-            * **🟡 Moderado (2 pts):** Sinais comportamentais que indicam necessidade de vigilância.
-            * **Contas Recém-abertas:** Operações relevantes em contas com menos de 30 dias.
-            * **Uso de Terceiros:** Movimentação por procuradores ou representação de múltiplas empresas (Ex: IDs 1034, 1038).
-            * **Inconsistência Cadastral:** Uso do mesmo e-mail ou IP por pessoas distintas (Ex: ID 1042).
-
-            ---
-
-            ### **2. Indicadores Matemáticos (Métricas de Massa)**
-
-            Cálculos estatísticos aplicados sobre todo o histórico do envolvido no RIF:
-
-            * **HHI (Concentração):** O *Índice de Herfindahl-Hirschman* mede o nível de dispersão dos recursos. Um HHI alto indica que o dinheiro está concentrado em pouquíssimas contrapartes (típico de contas-âncora).
-            * **Fracionamento Temporal:** Identifica dias específicos com 3 ou mais operações simultâneas, um forte sinalizador de fracionamento de valores.
-            * **Proximidade de Limites:** Monitora operações que "orbitam" entre 90% e 99% do limite de reporte (R$ 50 mil), sugerindo tentativa de evitar o radar regulatório.
-
-            ---
-
-            ### **3. Regra de Consolidação do Score**
-
-            A pontuação final que define o lugar do envolvido no **Ranking** é calculada assim:
-
-            | Componente | Regra de Pontuação |
-            | --- | --- |
-            | **Soma Qualitativa** | Total de pontos acumulados por todos os alertas detectados. |
-            | **Bônus de Perfil** | **+5 pts** para cada flag confirmada (PEP, Servidor ou Pessoa Obrigada). |
-            | **Bônus HHI** | **+10 pts** fixos se o índice de concentração for superior a 0.6. |
-            | **Bônus de Frequência** | **+2 pts** para cada dia identificado com fracionamento temporal. |
-
-            ---
-
-            **💡 Dica de Análise:** Um Score alto vindo de indicadores matemáticos sugere uma conta estrutural (passagem), enquanto um Score alto vindo de padrões qualitativos sugere uma irregularidade comportamental específica.
-
-            """)
-        # --- FIM DA SEÇÃO DE AJUDA ---
-
-        if "df_final" in st.session_state:
-            with st.spinner("Consolidando Score de Risco..."):
-                # A. Indicadores Matemáticos
-                df_env_math = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
-                
-                # B. Alertas Qualitativos (Função do script principal)
-                df_alertas_brutos = analyze_suspicious_patterns(
-                    df_display, st.session_state.df_ocorrencias,
-                    st.session_state.df_comunicacoes, st.session_state.df_envolvidos
-                )
-
-                # C. Cruzamento de Dados
-                if not df_alertas_brutos.empty:
-                    df_resumo_alertas = df_alertas_brutos.groupby('cpfCnpj').agg(
-                        Score_Quali=('Pontos', 'sum'),
-                        Qtd_Alertas=('Motivo', 'count')
-                    ).reset_index()
-                    df_ranking = pd.merge(df_env_math, df_resumo_alertas, left_on='cpfCnpjEnvolvido', right_on='cpfCnpj', how='left').fillna(0)
-                else:
-                    df_ranking = df_env_math.assign(Score_Quali=0, Qtd_Alertas=0)
-
-                # D. Aplicação das Regras de Score
-                df_ranking['ScoreTotal'] = df_ranking['Score_Quali']
-                df_ranking['ScoreTotal'] += df_ranking['flag_pep'].astype(int) * 5
-                df_ranking['ScoreTotal'] += df_ranking['flag_servidor'].astype(int) * 5
-                df_ranking['ScoreTotal'] += (df_ranking['hhi_contrapartes'] > 0.6).astype(int) * 10
-                df_ranking['ScoreTotal'] += df_ranking['fracionamento_dias_com_3+_ops'] * 2
-
-                df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
-                df_ranking.insert(0, "Pos.", range(1, len(df_ranking) + 1))
-
-                # E. Tabela de Ranking Interativa (Formatada BRL)
-                st.subheader("Classificação de Risco")
-                st.caption("Clique em uma linha para ver os padrões detalhados do envolvido abaixo.")
-                
-                # Selecionamos as colunas
-                df_to_show = df_ranking[["Pos.", "cpfCnpjEnvolvido", "nomeEnvolvido", "n_comunicacoes", "ScoreTotal", "valor_total"]].head(100)
-
-                # Aplicamos a formatação brasileira via Styler do Pandas
-                df_styled = df_to_show.style.format({
-                    "valor_total": lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                })
-
-                sel_rank = st.dataframe(
-                    df_styled,
-                    use_container_width=True, 
-                    hide_index=True,
-                    on_select="rerun", 
-                    selection_mode="single-row", 
-                    key="rank_table_select",
-                    column_config={
-                        "n_comunicacoes": "Qtd. Com.",
-                        "ScoreTotal": st.column_config.ProgressColumn(
-                            "Score", 
-                            format="%d pts", 
-                            min_value=0, 
-                            max_value=int(df_ranking['ScoreTotal'].max())
-                        ),
-                        "valor_total": st.column_config.NumberColumn("Valor Total") 
-                    }
-                )
-
-                # F. Gráfico
-                fig_risk = px.scatter(df_ranking.head(30), x='valor_total', y='ScoreTotal', size='ScoreTotal', color='ScoreTotal',
-                                     hover_name='nomeEnvolvido', title="Dispersão: Valor vs Score")
-                st.plotly_chart(fig_risk, use_container_width=True)
-
-                # G. DETALHAMENTO AO SELECIONAR (Tabela solicitada)
-                selection = sel_rank.get("selection", {}).get("rows", [])
-                if selection:
-                    row_idx = selection[0]
-                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
-                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
-
-                    st.markdown("---")
-                    # Exibe a tabela de padrões identificados
-                    st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
-                    
-                    detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
-                    if not detalhes_alvo.empty:
-                        st.dataframe(
-                            detalhes_alvo[['Indexador', 'idComunicacao', 'Motivo', 'Risco']],
-                            use_container_width=True, hide_index=True,
-                            column_config={"Motivo": st.column_config.TextColumn("Descrição do Alerta", width="large")}
-                        )
-                    else:
-                        st.info("Este alvo possui score baseado apenas em indicadores matemáticos (HHI, PEP ou Volume).")
-
-                # H. Detalhamento de Fluxo e Padrões ao Selecionar Linha
-                selection = sel_rank.get("selection", {}).get("rows", [])
-                if selection:
-                    row_idx = selection[0]
-                    sel_cpf = df_ranking.iloc[row_idx]["cpfCnpjEnvolvido"]
-                    sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
-
-                    st.markdown("---")
-                    st.subheader(f"🔍 Análise de Fluxo Estruturado: {sel_nome}")
-                    
-                    # --- Análise de Fluxo (Aba Ranking) ---
-                    col_rf1, col_rf2 = st.columns(2)
-                    with col_rf1:
-                        v_min_rank = st.number_input("Valor mínimo por vínculo (R$)", min_value=0, value=10000, step=5000, key=f"rank_vmin_{sel_cpf}")
-                    with col_rf2:
-                        n_links_rank = st.slider("Máximo de contrapartes", 5, 30, 10, key=f"rank_nlinks_{sel_cpf}")
-                    
-                    with st.spinner("Gerando diagrama..."):
-                        fig_sankey_rank = plot_sankey_envolvido_estruturado(df_display, sel_cpf, sel_nome, min_value=v_min_rank, top_n=n_links_rank)
-                        if fig_sankey_rank:
-                            st.plotly_chart(fig_sankey_rank, use_container_width=True, key=f"plot_sankey_rank_{sel_cpf}")
-                        else:
-                            st.info("Não há vínculos estruturados suficientes para este alvo nos RIFs filtrados.")
-
-    # --- Conteúdo da Aba 7: Ranking de Comunicações ---
+    # --- Conteúdo da Aba 4: Ranking de Comunicações ---
     with tabranking_com:
         st.header("Ranking de Comunicações")
         st.caption(
@@ -3867,49 +3793,200 @@ if st.session_state.data_loaded:
                 else:
                     st.caption("Selecione uma linha na tabela acima para ver o detalhamento completo da comunicação.")
     
-    # --- Conteúdo da Aba 8: Pagamentos - Portal da Transparência ---
-    with tabpagamentos_com:
-    st.header("🔍 Pagamentos - Portal da Transparência")
-    st.markdown("""
-    Esta ferramenta cruza os dados do RIF com pagamentos efetuados pelo Governo Federal 
-    diretamente da API oficial.
-    """)
+    # --- Conteúdo da Aba 5: Análise por Comunicação ---
+    with tab_comunicacao:
+        st.header("🔎 Análise por Comunicação (Indexador)")
 
-    # 1. Seleção de Alvo e Período
-    col1, col2 = st.columns(2)
-    with col1:
-        alvos_disponiveis = envolvidos_df['nome_cpf'].unique()
-        selecionado = st.selectbox("Selecione um envolvido para diligência:", alvos_disponiveis)
-        cpf_cnpj = selecionado.split('(')[-1].replace(')', '').strip()
-    
-    with col2:
-        # Sugere o período de 1 ano para análise inicial
-        hoje = pd.Timestamp.now()
-        data_range = st.date_input("Período de busca:", [hoje - pd.Timedelta(days=365), hoje])
+        # Verificar se os dataframes base existem
+        if 'df_comunicacoes' not in st.session_state or st.session_state.df_comunicacoes is None or \
+           'df_envolvidos' not in st.session_state or st.session_state.df_envolvidos is None or \
+           'df_ocorrencias' not in st.session_state or st.session_state.df_ocorrencias is None:
+            st.warning("DataFrames base não estão carregados no estado da sessão.")
+        else:
+            # Pegar lista de Indexadores únicos do df_comunicacoes original para garantir que todos estejam disponíveis
+            lista_indexadores = ["Selecione..."] + sorted(st.session_state.df_comunicacoes['Indexador'].unique().tolist())
 
-    if st.button("Executar Consulta no Portal"):
-        if len(data_range) == 2:
-            with st.spinner(f"Consultando pagamentos para {selecionado}..."):
-                df_pagamentos = fetch_portal_transparencia_data(cpf_cnpj, data_range[0], data_range[1])
+            default_index = 0 # Padrão é "Selecione..."
+            jump_indexador = st.session_state.get('jump_target_indexador', None)
+            if jump_indexador and jump_indexador in lista_indexadores:
+                try:
+                    default_index = lista_indexadores.index(jump_indexador)
+                except ValueError:
+                    default_index = 0 # Mantém padrão se não encontrar por algum motivo
+
+            selected_indexador = st.selectbox(
+                "Selecione o Indexador da Comunicação:",
+                options=lista_indexadores,
+                index=default_index, # Usa o índice calculado
+                key='select_indexador'
+            )
+
+            if jump_indexador:
+                st.session_state.jump_target_indexador = None
+                st.session_state.trigger_jump = False
+
+            if selected_indexador != "Selecione...":
+                # Chama a função mestre com prefixo exclusivo para esta aba
+                render_analise_comunicacao(selected_indexador, key_prefix="aba_comunicacao")
+            else:
+                 st.info("Selecione um Indexador na lista acima para ver os detalhes.")
+
+    # --- Conteúdo da Aba 6: Pagamentos - Portal da Transparência ---
+    with tab_pagamentos:
+        st.header("🔍 Pagamentos - Portal da Transparência")
+        st.markdown("""
+        Esta ferramenta cruza os dados do RIF com pagamentos efetuados pelo Governo Federal 
+        diretamente da API oficial.
+        """)
+
+        # 1. Usamos o df_final que você já armazena no estado da sessão
+        if st.session_state.get('data_loaded') and st.session_state.df_final is not None:
+            df_base = st.session_state.df_final
+            
+            # 2. Preparar lista de CPFs/CNPJs únicos para o seletor
+            # Criamos a coluna de exibição apenas para o seletor
+            envolvidos_unicos = df_base[['nomeEnvolvido', 'cpfCnpjEnvolvido']].drop_duplicates()
+            envolvidos_unicos = envolvidos_unicos[envolvidos_unicos['cpfCnpjEnvolvido'] != 'DESCONHECIDO']
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                # Criar lista formatada "Nome (CPF/CNPJ)"
+                opcoes = [f"{row['nomeEnvolvido']} ({row['cpfCnpjEnvolvido']})" for _, row in envolvidos_unicos.iterrows()]
+                selecionado = st.selectbox("Selecione um envolvido para diligência:", sorted(opcoes), key="sel_diligencia_final")
                 
-                if not df_pagamentos.empty:
-                    st.success(f"Encontrados {len(df_pagamentos)} registos de pagamento.")
-                    
-                    # Exibição de Métricas
-                    total_recebido = df_pagamentos['valorTotal'].astype(float).sum()
-                    st.metric("Total Recebido da União (Período)", f"R$ {total_recebido:,.2f}")
-                    
-                    # Tabela detalhada
-                    st.subheader("Detalhamento dos Recebimentos")
-                    st.dataframe(
-                        df_pagamentos[['data', 'orgaoSuperior', 'valorTotal', 'documento']],
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                # Extrair o documento de dentro dos parênteses
+                import re
+                cpf_cnpj_match = re.search(r'\((.*?)\)', selecionado)
+                cpf_cnpj_alvo = cpf_cnpj_match.group(1) if cpf_cnpj_match else ""
+            
+            with col2:
+                # 1. Recuperar o período selecionado no filtro global da sidebar
+                hoje = pd.Timestamp.now()
+                
+                # Se o filtro da sidebar existir e tiver data de início e fim
+                if 'date_filter' in st.session_state and len(st.session_state.date_filter) == 2:
+                    data_padrao_inicio = st.session_state.date_filter[0]
+                    data_padrao_fim = st.session_state.date_filter[1]
                 else:
-                    st.info("Nenhum pagamento encontrado para este CPF/CNPJ no período selecionado.")        
+                    # Fallback caso o filtro lateral ainda não tenha sido usado
+                    data_padrao_inicio = hoje - pd.Timedelta(days=365)
+                    data_padrao_fim = hoje
+
+                # 2. Aplicar as datas sincronizadas ao widget de data da aba
+                data_range = st.date_input(
+                    "Período de busca (Sincronizado com Filtro Global):", 
+                    [data_padrao_inicio, data_padrao_fim], 
+                    key="date_diligencia_final"
+                )
+
+            # 3. Botão de Execução
+            if st.button("🚀 Consultar Portal da Transparência"):
+                if len(data_range) == 2:
+                    with st.spinner(f"Consultando pagamentos para {selecionado}..."):
+                        # Chamada da função que funcionou no seu teste (usando codigoPessoa e ano)
+                        res_api = fetch_portal_transparencia_data(cpf_cnpj_alvo, data_range[0], data_range[1])
+                        st.session_state.df_pagamentos_resultado = res_api
+                else:
+                    st.error("Por favor, selecione o período de início e fim.")
+
+            # 4. Exibição dos Resultados (Persistidos na sessão)
+            # --- Dentro da Aba 8: Pagamentos ---
+            if 'df_pagamentos_resultado' in st.session_state and not st.session_state.df_pagamentos_resultado.empty:
+                df_res = st.session_state.df_pagamentos_resultado
+                
+                # 1. CRIAÇÃO DA COLUNA NUMÉRICA (Essencial para evitar o KeyError)
+                # Usamos a função global limpar_valor_portal que criamos anteriormente
+                col_valor_orig = 'valor' if 'valor' in df_res.columns else 'valorTotal'
+                df_res['valor_float'] = df_res[col_valor_orig].apply(limpar_valor_portal)
+
+                # 2. CÁLCULO DE NEXO TEMPORAL (Alertas de Proximidade)
+                # Obtemos as datas únicas do RIF para este alvo
+                datas_rif = st.session_state.df_final[
+                    st.session_state.df_final['cpfCnpjEnvolvido'] == cpf_cnpj_alvo
+                ]['Data_da_operacao'].dt.date.unique()
+
+                def verificar_nexo(data_pag_str):
+                    try:
+                        dt_pag = pd.to_datetime(data_pag_str, format='%d/%m/%Y').date()
+                        # Identifica proximidade se |d_RIF - d_pag| <= 5 dias
+                        return any(abs((dt_rif - dt_pag).days) <= 5 for dt_rif in datas_rif)
+                    except: return False
+
+                df_res['Alerta_Temporal'] = df_res['data'].apply(verificar_nexo)
+                
+                # 3. EXIBIÇÃO DA TABELA FORMATADA
+                st.subheader("📑 Detalhamento com Alerta de Proximidade")
+                st.caption("🚩 Linhas destacadas indicam pagamentos próximos (± 5 dias) a comunicações do RIF.")
+
+                def style_proximidade(row):
+                    return ['background-color: #fff3cd; font-weight: bold'] * len(row) if row['Alerta_Temporal'] else [''] * len(row)
+
+                cols_viz = [c for c in ['data', 'orgaoSuperior', 'valor', 'documento', 'observacao'] if c in df_res.columns]
+                st.dataframe(
+                    df_res.style.apply(style_proximidade, axis=1),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                # 4. GRÁFICO DE LINHA DO TEMPO (Nexo Causal)
+                st.markdown("---")
+                st.subheader(f"📅 Linha do Tempo: Nexo Causal")
+                
+                import plotly.graph_objects as go
+                
+                # Filtra os dados do RIF para o MESMO período selecionado no 'data_range'
+                df_rif_plot = st.session_state.df_final[
+                    (st.session_state.df_final['cpfCnpjEnvolvido'] == cpf_cnpj_alvo) &
+                    (st.session_state.df_final['Data_da_operacao'].dt.date >= data_range[0]) &
+                    (st.session_state.df_final['Data_da_operacao'].dt.date <= data_range[1])
+                ].copy()
+
+                df_portal_plot = df_res.copy()
+                df_portal_plot['data_dt'] = pd.to_datetime(df_portal_plot['data'], format='%d/%m/%Y')
+                
+                fig_timeline = go.Figure()
+                
+                # Adicionar Barras (Créditos da União)
+                fig_timeline.add_trace(go.Bar(
+                    x=df_portal_plot['data_dt'],
+                    y=df_portal_plot['valor_float'],
+                    name='💰 Crédito União',
+                    marker_color='#2ECC71'
+                ))
+
+                # Adicionar Pontos (Alertas RIF filtrados pelo período)
+                fig_timeline.add_trace(go.Scatter(
+                    x=df_rif_plot['Data_da_operacao'],
+                    y=df_rif_plot['ValorTotal'],
+                    mode='markers',
+                    name='🚩 Alerta RIF',
+                    marker=dict(size=12, color='#E74C3C', symbol='diamond')
+                ))
+
+                # Configura o eixo X para respeitar rigorosamente o intervalo da tabela
+                fig_timeline.update_layout(
+                    template="plotly_white", 
+                    hovermode="x unified", 
+                    height=450,
+                    xaxis=dict(
+                        title="Período da Diligência",
+                        range=[data_range[0], data_range[1]],
+                        type='date'
+                    ),
+                    yaxis=dict(title="Valor (R$)"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                st.plotly_chart(fig_timeline, use_container_width=True)
+            
+            
+            elif 'df_pagamentos_resultado' in st.session_state:
+                st.info("Nenhum registro encontrado no Portal para este período.")
+                
+        else:
+            st.warning("⚠️ Por favor, processe os arquivos CSV na barra lateral primeiro para habilitar a diligência.")
 
 
+            
     # --- Seção de Exportação (Fora das Abas) ---
     if not df_display.empty:
         st.divider()
@@ -3989,6 +4066,8 @@ if st.session_state.data_loaded:
                      st.code(traceback.format_exc())
     else:
         st.info("Aplique filtros que retornem dados para habilitar a exportação.")
+
+
 
 
 # --- Mensagem se nenhum arquivo foi carregado ou botão não pressionado ---
