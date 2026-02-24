@@ -2,6 +2,9 @@
 from __future__ import annotations
 import pandas as pd
 import numpy as np
+import requests
+import streamlit as st
+
 
 def _safe_div(num, den):
     return float(num) / float(den) if den and den != 0 and not pd.isna(den) else 0.0
@@ -85,3 +88,41 @@ def calc_indicadores_pares(df: pd.DataFrame, valor_col: str = "ValorTotal") -> p
         valor_total_par=(valor_col + "_contra", "sum"),
         n_comunicacoes_compartilhadas=("Indexador_x", "nunique")
     ).reset_index().rename(columns={"cpfCnpjEnvolvido_orig": "cpf_origem", "cpfCnpjEnvolvido_contra": "cpf_contraparte"})
+
+def fetch_portal_transparencia_data(cpf_cnpj, data_inicio, data_fim):
+    """
+    Consulta pagamentos no Portal da Transparência para um CPF/CNPJ específico.
+    Requer um token de API (Chave) válido.
+    """
+    # Remover caracteres não numéricos do CPF/CNPJ
+    id_limpo = ''.join(filter(str.isdigit, str(cpf_cnpj)))
+    
+    # A URL do endpoint de despesas por favorecido
+    url = "https://api.portaldatransparencia.gov.br/api-de-dados/despesas/por-favorecido"
+    
+    # Cabeçalhos necessários (O Token deve estar nos secrets do Streamlit)
+    headers = {
+        "accept": "*/*",
+        "chave-api-dados": st.secrets["portal_transparencia_token"]
+    }
+    
+    params = {
+        "codigoFavorecido": id_limpo,
+        "dataInicial": data_inicio.strftime('%d/%m/%Y'),
+        "dataFinal": data_fim.strftime('%d/%m/%Y'),
+        "pagina": 1
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code == 200:
+            return pd.DataFrame(response.json())
+        elif response.status_code == 401:
+            st.error("Token da API do Portal da Transparência inválido ou expirado.")
+            return pd.DataFrame()
+        else:
+            st.warning(f"Erro na consulta: {response.status_code}")
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro de conexão com o Portal: {str(e)}")
+        return pd.DataFrame()       

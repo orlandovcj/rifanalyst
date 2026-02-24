@@ -2529,7 +2529,7 @@ if st.session_state.data_loaded:
 
     # --- Criação das Abas ---
     #tab_geral, tab_patterns, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
-    tab_geral, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network = st.tabs([
+    tab_geral, tabranking,  tab_individual, tabranking_com, tab_comunicacao, tab_network, tab_pagamentos = st.tabs([
         "📊 Análise Geral",
         #"⚠️ Padrões Suspeitos",
         "🏆 Ranking de Envolvidos",
@@ -2537,6 +2537,7 @@ if st.session_state.data_loaded:
         "💬 Ranking de Comunicações",
         "🔎 Análise por Comunicação",
         "🌐 Análise de Rede Individual",
+        "🔍 Diligência Automática - Portal da Transparência",
 
     ])
 
@@ -3630,7 +3631,6 @@ if st.session_state.data_loaded:
                         else:
                             st.info("Não há vínculos estruturados suficientes para este alvo nos RIFs filtrados.")
 
-
     # --- Conteúdo da Aba 7: Ranking de Comunicações ---
     with tabranking_com:
         st.header("Ranking de Comunicações")
@@ -3867,6 +3867,48 @@ if st.session_state.data_loaded:
                 else:
                     st.caption("Selecione uma linha na tabela acima para ver o detalhamento completo da comunicação.")
     
+    # --- Conteúdo da Aba 8: Pagamentos - Portal da Transparência ---
+    with tabpagamentos_com:
+    st.header("🔍 Pagamentos - Portal da Transparência")
+    st.markdown("""
+    Esta ferramenta cruza os dados do RIF com pagamentos efetuados pelo Governo Federal 
+    diretamente da API oficial.
+    """)
+
+    # 1. Seleção de Alvo e Período
+    col1, col2 = st.columns(2)
+    with col1:
+        alvos_disponiveis = envolvidos_df['nome_cpf'].unique()
+        selecionado = st.selectbox("Selecione um envolvido para diligência:", alvos_disponiveis)
+        cpf_cnpj = selecionado.split('(')[-1].replace(')', '').strip()
+    
+    with col2:
+        # Sugere o período de 1 ano para análise inicial
+        hoje = pd.Timestamp.now()
+        data_range = st.date_input("Período de busca:", [hoje - pd.Timedelta(days=365), hoje])
+
+    if st.button("Executar Consulta no Portal"):
+        if len(data_range) == 2:
+            with st.spinner(f"Consultando pagamentos para {selecionado}..."):
+                df_pagamentos = fetch_portal_transparencia_data(cpf_cnpj, data_range[0], data_range[1])
+                
+                if not df_pagamentos.empty:
+                    st.success(f"Encontrados {len(df_pagamentos)} registos de pagamento.")
+                    
+                    # Exibição de Métricas
+                    total_recebido = df_pagamentos['valorTotal'].astype(float).sum()
+                    st.metric("Total Recebido da União (Período)", f"R$ {total_recebido:,.2f}")
+                    
+                    # Tabela detalhada
+                    st.subheader("Detalhamento dos Recebimentos")
+                    st.dataframe(
+                        df_pagamentos[['data', 'orgaoSuperior', 'valorTotal', 'documento']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("Nenhum pagamento encontrado para este CPF/CNPJ no período selecionado.")        
+
 
     # --- Seção de Exportação (Fora das Abas) ---
     if not df_display.empty:
