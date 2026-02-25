@@ -1998,6 +1998,19 @@ def generate_word_cloud_and_keywords(text, max_words=50, top_n_keywords=10):
         # st.code(traceback.format_exc()) # Opcional
         return None, None, None
 
+def extrair_capital_social(texto):
+    """Extrai o Capital Social declarado em narrativas bancárias."""
+    if pd.isna(texto): return 0.0
+    # Padrão para capturar "capital social de R$ 1.000,00" ou similar
+    padrao = r"capital\s+social\s*(?:\(.*?\))?\s*(?:de|:)?\s*R\$\s*(?P<val>[\d.,]+)"
+    match = re.search(padrao, str(texto), re.IGNORECASE)
+    if match:
+        val_str = match.group('val')
+        # Normalização para float (padrão BR)
+        val_limpo = val_str.replace('.', '').replace(',', '.')
+        try: return float(val_limpo)
+        except: return 0.0
+    return 0.0
 
 def analise_benford(df):
     """Calcula e plota a Lei de Benford para os valores das transações."""
@@ -3278,7 +3291,6 @@ if st.session_state.data_loaded:
                 df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
 
                 # --- Triagem Automática Corrigida (Usa o Top 30 do Score Total) ---
-                # --- Triagem Automática Sincronizada (2022-2026) ---
                 if not st.session_state.get('alerts_processed', False):
                     top_30_alvos = df_ranking.head(30)
                     
@@ -3475,6 +3487,27 @@ if st.session_state.data_loaded:
                 col3_ind.metric("PEP", "Sim" if pep_flag else "Não")
                 col4_ind.metric("Pessoa Obrigada", "Sim" if obr_flag else "Não")
                 col5_ind.metric("Servidor Público", "Sim" if ser_flag else "Não")
+                
+                # --- NOVO: CÁLCULO DE ALAVANCAGEM SOB DEMANDA ---
+                # Executa o Regex apenas para as comunicações deste envolvido específico
+                cap_social_ind = envolvido_data['informacoesAdicionais'].apply(extrair_capital_social).max()
+                
+                if cap_social_ind > 0:
+                    alavancagem_ind = valor_total_ind_real / cap_social_ind
+                    
+                    st.markdown("---")
+                    c_al1, c_al2 = st.columns([1, 2])
+                    
+                    with c_al1:
+                        st.metric("Capital Social Identificado", f"R$ {cap_social_ind:,.2f}")
+                    
+                    with c_al2:
+                        # Exibição de Alerta Crítico
+                        if alavancagem_ind > 100:
+                            st.error(f"🚩 **ALERTA DE ALAVANCAGEM CRÍTICA:** Este alvo movimentou **{alavancagem_ind:.1f} vezes** o seu capital social declarado.")
+                            st.caption("Indício de empresa de fachada ou conta de passagem utilizada para ocultação de valores.")
+                        else:
+                            st.success(f"Índice de Alavancagem: {alavancagem_ind:.1f}x o Capital Social.")
 
                 # Comunicações
                 st.markdown("---")
