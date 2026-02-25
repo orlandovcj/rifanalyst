@@ -3248,7 +3248,7 @@ if st.session_state.data_loaded:
             """)
 
         if "df_final" in st.session_state:
-            with st.spinner("Consolidando Score de Risco e realizando triagem pública..."):
+            with st.spinner("Consolidando Score de Risco e verificando pagamentos..."):
                 # A. Indicadores Matemáticos
                 df_env_math = rif_ind.calc_indicadores_envolvido(st.session_state.df_final)
                 
@@ -3278,36 +3278,41 @@ if st.session_state.data_loaded:
                 df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
 
                 # --- Triagem Automática Corrigida (Usa o Top 30 do Score Total) ---
+                # --- Triagem Automática Sincronizada (2022-2026) ---
                 if not st.session_state.get('alerts_processed', False):
-                    # Pegamos o Top 30 baseado no ScoreTotal calculado acima
                     top_30_alvos = df_ranking.head(30)
                     
                     if 'cpfs_com_alerta_publico' not in st.session_state:
                         st.session_state.cpfs_com_alerta_publico = set()
 
-                    with st.status("🏛️ Triagem Pública: Verificando Top 30 no Portal...") as status:
+                    with st.status("🏛️ Portal da Transparência: Verificando Top 30...") as status:
                         progresso = st.progress(0)
                         total = len(top_30_alvos)
+                        ano_atual = pd.Timestamp.now().year
                         
                         for i, (idx, row) in enumerate(top_30_alvos.iterrows()):
-                            # Limpeza para consulta e armazenamento
                             doc = ''.join(filter(str.isdigit, str(row['cpfCnpjEnvolvido'])))
                             
                             if doc:
-                                hoje = pd.Timestamp.now()
-                                res = fetch_portal_transparencia_data(doc, hoje - pd.Timedelta(days=365), hoje)
-                                
-                                if not res.empty:
-                                    res['v_temp'] = res['valor'].apply(limpar_valor_portal)
-                                    if res['v_temp'].sum() != 0:
-                                        st.session_state.cpfs_com_alerta_publico.add(doc)
+                                # Realiza a busca em cascata nos anos de interesse
+                                found_payment = False
+                                for ano in range(2022, ano_atual + 1):
+                                    # Consulta o exercício específico conforme a lógica da Aba 8
+                                    res = fetch_portal_transparencia_data(doc, pd.Timestamp(year=ano, month=1, day=1), None)
+                                    
+                                    if not res.empty:
+                                        res['v_temp'] = res['valor'].apply(limpar_valor_portal)
+                                        if res['v_temp'].sum() > 0:
+                                            st.session_state.cpfs_com_alerta_publico.add(doc)
+                                            found_payment = True
+                                            break # Se achou em um ano, não precisa checar os outros
                             
                             progresso.progress((i + 1) / total)
                         
                         st.session_state.alerts_processed = True
-                        status.update(label="✅ Triagem concluída!", state="complete")
-                        st.rerun() # Atualiza a tela para mostrar os ícones injetados
-
+                        status.update(label="✅ Busca no Portal da Transparência concluída!", state="complete")
+                        st.rerun()
+                
                 # E. Injeção do Ícone (Comparação Numérica Pura)
                 def formatar_nome_alerta(row):
                     doc_limpo = ''.join(filter(str.isdigit, str(row['cpfCnpjEnvolvido'])))
@@ -3351,7 +3356,7 @@ if st.session_state.data_loaded:
                                      hover_name='nomeEnvolvido', title="Dispersão: Valor vs Score")
                 st.plotly_chart(fig_risk, use_container_width=True)
 
-                # G. DETALHAMENTO AO SELECIONAR (Tabela solicitada)
+                # G. DETALHAMENTO AO SELECIONAR (ATUALIZADO)
                 selection = sel_rank.get("selection", {}).get("rows", [])
                 if selection:
                     row_idx = selection[0]
@@ -3359,7 +3364,42 @@ if st.session_state.data_loaded:
                     sel_nome = df_ranking.iloc[row_idx]["nomeEnvolvido"]
 
                     st.markdown("---")
-                    # Exibe a tabela de padrões identificados
+                    
+                    # --- NOVA TABELA: Dados das Comunicações do Envolvido ---
+                    st.subheader(f"💬 Comunicações Vinculadas: {sel_nome}")
+                    
+                    # 1. Filtro e contagem (mantido conforme lógica anterior)
+                    df_comms_alvo = df_display[df_display['cpfCnpjEnvolvido'] == sel_cpf].copy()
+                    id_comms_alvo = df_comms_alvo['idComunicacao'].unique()
+                    df_counts = st.session_state.df_final[st.session_state.df_final['idComunicacao'].isin(id_comms_alvo)]
+                    counts_map = df_counts.groupby('idComunicacao')['cpfCnpjEnvolvido'].nunique().to_dict()
+                    df_comms_alvo['Qtd_Envolvidos'] = df_comms_alvo['idComunicacao'].map(counts_map)
+
+                    # 2. Definição da sequência EXATA das colunas
+                    cols_financeiras = [f'ValorCampo{c}' for c in ['A','B','C','D','E']]
+                    cols_show = ['Indexador_x', 'idComunicacao', 'Data_da_operacao', 'nomeComunicante', 'Qtd_Envolvidos'] + cols_financeiras
+                    
+                    # 3. Seleção explícita para garantir a ordem da visualização
+                    # Primeiro removemos as duplicatas e depois aplicamos a ordem da lista cols_show
+                    df_comms_final = df_comms_alvo.drop_duplicates(subset=['idComunicacao'])[cols_show]
+
+                    st.dataframe(
+                        df_comms_final.style.format({c: "R$ {:,.2f}" for c in cols_financeiras}),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Indexador_x": "Indexador",
+                            "idComunicacao": "ID Comunicação",
+                            "Data_da_operacao": st.column_config.DateColumn("Data Operação", format="DD/MM/YYYY"),
+                            "nomeComunicante": "Comunicante",
+                            "Qtd_Envolvidos": st.column_config.NumberColumn("Envolvidos", format="%d"),
+                            # Ajuste de largura para os campos financeiros
+                            **{c: st.column_config.NumberColumn(c.replace("ValorCampo", "Valor "), format="R$ %.2f") for c in cols_financeiras}
+                        }
+                    )
+
+                    st.markdown("---")
+                    # --- TABELA ORIGINAL: Detalhe dos Padrões Identificados ---
                     st.subheader(f"⚠️ Detalhe dos Padrões Identificados: {sel_nome}")
                     
                     detalhes_alvo = df_alertas_brutos[df_alertas_brutos['cpfCnpj'] == sel_cpf].copy()
@@ -3437,7 +3477,44 @@ if st.session_state.data_loaded:
                 col5_ind.metric("Servidor Público", "Sim" if ser_flag else "Não")
 
                 # Comunicações
-                st.subheader("📋 Comunicações e Ocorrências (Filtradas)")
+                st.markdown("---")
+                pessoa_selecionada = selected_cpf_individual
+                st.subheader(f"💬 Comunicações Vinculadas")
+
+                # 1. Filtro e contagem de envolvidos (Rede)
+                df_comms_detalhe = df_display[df_display['cpfCnpjEnvolvido'] == pessoa_selecionada].copy()
+                id_comms_alvo = df_comms_detalhe['idComunicacao'].unique()
+                
+                # Busca a volumetria na base completa
+                df_counts = st.session_state.df_final[st.session_state.df_final['idComunicacao'].isin(id_comms_alvo)]
+                counts_map = df_counts.groupby('idComunicacao')['cpfCnpjEnvolvido'].nunique().to_dict()
+                df_comms_detalhe['Qtd_Envolvidos'] = df_comms_detalhe['idComunicacao'].map(counts_map)
+
+                # 2. Definição da sequência EXATA das colunas solicitada
+                cols_financeiras = [f'ValorCampo{c}' for c in ['A','B','C','D','E']]
+                cols_show = ['Indexador_x', 'idComunicacao', 'Data_da_operacao', 'nomeComunicante', 'Qtd_Envolvidos'] + cols_financeiras
+                
+                # 3. Preparação do DataFrame final (Ordem e Unicidade)
+                df_comms_final = df_comms_detalhe.drop_duplicates(subset=['idComunicacao'])[cols_show]
+
+                # 4. Renderização com a configuração de colunas amigável
+                st.dataframe(
+                    df_comms_final.style.format({c: "R$ {:,.2f}" for c in cols_financeiras}),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Indexador_x": "Indexador",
+                        "idComunicacao": "ID Comunicação",
+                        "Data_da_operacao": st.column_config.DateColumn("Data Operação", format="DD/MM/YYYY"),
+                        "nomeComunicante": "Comunicante",
+                        "Qtd_Envolvidos": st.column_config.NumberColumn("Envolvidos", format="%d"),
+                        **{c: st.column_config.NumberColumn(c.replace("ValorCampo", "Valor "), format="R$ %.2f") for c in cols_financeiras}
+                    }
+                )
+                                
+                st.markdown("---")
+                
+                st.subheader("📋 Comunicações, Ocorrências e Papeis")
                 cols_to_show_base = ['Indexador_x','idComunicacao', 'Data_da_operacao', 'Ocorrencia',
                                 'CidadeAgencia', 'NumeroAgencia', 'tipoEnvolvido',
                                 'CodigoSegmento', 'DescricaoCampos']
@@ -3787,7 +3864,7 @@ if st.session_state.data_loaded:
 
                 if selected_indexador:
                     st.markdown("---")
-                    st.subheader(f"🔍 Detalhamento da Comunicação {selected_indexador}")
+                    # st.subheader(f"🔍 Detalhamento da Comunicação {selected_indexador}")
                     # Chama a função mestre com prefixo exclusivo para esta aba
                     render_analise_comunicacao(selected_indexador, key_prefix="aba_ranking_com")
                 else:
@@ -3831,244 +3908,152 @@ if st.session_state.data_loaded:
             else:
                  st.info("Selecione um Indexador na lista acima para ver os detalhes.")
 
-    # --- Conteúdo da Aba 6: Pagamentos - Portal da Transparência ---
+ # --- Conteúdo da Aba 8: Pagamentos - Portal da Transparência ---
     with tab_pagamentos:
         st.header("🔍 Pagamentos - Portal da Transparência")
         st.markdown("""
-        Esta ferramenta cruza os dados do RIF com pagamentos efetuados pelo Governo Federal 
-        diretamente da API oficial.
+        Esta ferramenta realiza uma busca pelos pagamentos *no período 2022-2026** cruzando os dados do RIF com 
+        recebimentos do Governo Federal.
         """)
 
-        # 1. Usamos o df_final que você já armazena no estado da sessão
         if st.session_state.get('data_loaded') and st.session_state.df_final is not None:
-            df_base = st.session_state.df_final
-            
-            # 2. Preparar lista de CPFs/CNPJs únicos para o seletor
-            # Criamos a coluna de exibição apenas para o seletor
-            envolvidos_unicos = df_base[['nomeEnvolvido', 'cpfCnpjEnvolvido']].drop_duplicates()
+            # 1. Seletor de Envolvido (Sincronizado)
+            envolvidos_unicos = st.session_state.df_final[['nomeEnvolvido', 'cpfCnpjEnvolvido']].drop_duplicates()
             envolvidos_unicos = envolvidos_unicos[envolvidos_unicos['cpfCnpjEnvolvido'] != 'DESCONHECIDO']
             
-            col1, col2 = st.columns(2)
-            with col1:
-                # Criar lista formatada "Nome (CPF/CNPJ)"
-                opcoes = [f"{row['nomeEnvolvido']} ({row['cpfCnpjEnvolvido']})" for _, row in envolvidos_unicos.iterrows()]
-                selecionado = st.selectbox("Selecione um envolvido para diligência:", sorted(opcoes), key="sel_diligencia_final")
-                
-                # Extrair o documento de dentro dos parênteses
-                import re
-                cpf_cnpj_match = re.search(r'\((.*?)\)', selecionado)
-                cpf_cnpj_alvo = cpf_cnpj_match.group(1) if cpf_cnpj_match else ""
+            opcoes = [f"{row['nomeEnvolvido']} ({row['cpfCnpjEnvolvido']})" for _, row in envolvidos_unicos.iterrows()]
+            selecionado = st.selectbox("Selecione um envolvido para diligência:", sorted(opcoes), key="sel_diligencia_hist_v17")
             
-            with col2:
-                # 1. Recuperar o período selecionado no filtro global da sidebar
-                hoje = pd.Timestamp.now()
+            # Extrair documento alvo (apenas números)
+            doc_alvo = ''.join(filter(str.isdigit, selecionado))
+
+            # --- AQUI ESTÁ O SEGREDO: Máscara de Normalização do ID ---
+            # Removemos pontos/traços da coluna do DataFrame para comparar com doc_alvo
+            mask_rif_alvo = st.session_state.df_final['cpfCnpjEnvolvido'].str.replace(r'\D', '', regex=True).str.contains(doc_alvo)
+
+            # 2. Execução da Busca Automática (2022-2026)
+            if st.button("🚀 Iniciar Busca"):
+                ano_atual = pd.Timestamp.now().year
+                lista_resultados = []
                 
-                # Se o filtro da sidebar existir e tiver data de início e fim
-                if 'date_filter' in st.session_state and len(st.session_state.date_filter) == 2:
-                    data_padrao_inicio = st.session_state.date_filter[0]
-                    data_padrao_fim = st.session_state.date_filter[1]
-                else:
-                    # Fallback caso o filtro lateral ainda não tenha sido usado
-                    data_padrao_inicio = hoje - pd.Timedelta(days=365)
-                    data_padrao_fim = hoje
+                with st.status(f"📡 Consultando base da CGU para {selecionado}...") as status:
+                    for ano in range(2022, ano_atual + 1):
+                        status.write(f"Buscando exercício {ano}...")
+                        df_ano = fetch_portal_transparencia_data(doc_alvo, pd.Timestamp(year=ano, month=1, day=1), None)
+                        if not df_ano.empty:
+                            lista_resultados.append(df_ano)
+                    
+                    if lista_resultados:
+                        st.session_state.df_pagamentos_resultado = pd.concat(lista_resultados, ignore_index=True)
+                        status.update(label="✅ Consulta concluída!", state="complete")
+                    else:
+                        st.session_state.df_pagamentos_resultado = pd.DataFrame()
+                        status.update(label="ℹ️ Nenhum pagamento encontrado no Portal.", state="complete")
 
-                # 2. Aplicar as datas sincronizadas ao widget de data da aba
-                data_range = st.date_input(
-                    "Período de busca (Sincronizado com Filtro Global):", 
-                    [data_padrao_inicio, data_padrao_fim], 
-                    key="date_diligencia_final"
-                )
-
-            # 3. Botão de Execução
-            if st.button("🚀 Consultar Portal da Transparência"):
-                if len(data_range) == 2:
-                    with st.spinner(f"Consultando pagamentos para {selecionado}..."):
-                        # Chamada da função que funcionou no seu teste (usando codigoPessoa e ano)
-                        res_api = fetch_portal_transparencia_data(cpf_cnpj_alvo, data_range[0], data_range[1])
-                        st.session_state.df_pagamentos_resultado = res_api
-                else:
-                    st.error("Por favor, selecione o período de início e fim.")
-
-            # 4. Exibição dos Resultados (Persistidos na sessão)
-            # --- Dentro da Aba 8: Pagamentos ---
+            # 3. EXIBIÇÃO DOS RESULTADOS CONSOLIDADOS
             if 'df_pagamentos_resultado' in st.session_state and not st.session_state.df_pagamentos_resultado.empty:
-                df_res = st.session_state.df_pagamentos_resultado
+                df_res = st.session_state.df_pagamentos_resultado.copy()
                 
-                # 1. CRIAÇÃO DA COLUNA NUMÉRICA (Essencial para evitar o KeyError)
-                # Usamos a função global limpar_valor_portal que criamos anteriormente
+                # Tratamento de datas e valores
                 col_valor_orig = 'valor' if 'valor' in df_res.columns else 'valorTotal'
                 df_res['valor_float'] = df_res[col_valor_orig].apply(limpar_valor_portal)
+                df_res['data_dt'] = pd.to_datetime(df_res['data'], format='%d/%m/%Y')
+                df_res['Ano'] = df_res['data_dt'].dt.year
+                df_res['mes_ref'] = df_res['data_dt'].dt.to_period('M').dt.to_timestamp()
 
-                # 2. CÁLCULO DE NEXO TEMPORAL (Alertas de Proximidade)
-                # Obtemos as datas únicas do RIF para este alvo
-                datas_rif = st.session_state.df_final[
-                    st.session_state.df_final['cpfCnpjEnvolvido'] == cpf_cnpj_alvo
-                ]['Data_da_operacao'].dt.date.unique()
+                # --- RESUMO FINANCEIRO ---
+                st.markdown("### 📊 Resumo de Pagamentos")
+                resumo_anual = df_res.groupby('Ano')['valor_float'].sum().reset_index()
+                total_geral = df_res['valor_float'].sum()
 
-                def verificar_nexo(data_pag_str):
+                c1, c2 = st.columns([1, 2])
+                c1.metric("Total Geral (2022-2026)", f"R$ {total_geral:,.2f}")
+                c2.table(resumo_anual.style.format({'valor_float': 'R$ {:,.2f}'}))
+
+                # --- TABELA COM ALERTA (M ou M+1) ---
+                st.markdown("---")
+                st.subheader("📑 Ordens Bancárias")
+                
+                # Aplicação da máscara corrigida para buscar datas do RIF
+                datas_rif = st.session_state.df_final[mask_rif_alvo]['Data_da_operacao'].dt.to_period('M').unique()
+
+                def verificar_nexo_expandido(dt_pag_dt):
                     try:
-                        dt_pag = pd.to_datetime(data_pag_str, format='%d/%m/%Y').date()
-                        # Identifica proximidade se |d_RIF - d_pag| <= 5 dias
-                        return any(abs((dt_rif - dt_pag).days) <= 5 for dt_rif in datas_rif)
+                        pag_period = dt_pag_dt.to_period('M')
+                        return any(rif_p == pag_period or rif_p == (pag_period + 1) for rif_p in datas_rif)
                     except: return False
 
-                df_res['Alerta_Temporal'] = df_res['data'].apply(verificar_nexo)
+                df_res['Alerta_Temporal'] = df_res['data_dt'].apply(verificar_nexo_expandido)
                 
-                # 3. EXIBIÇÃO DA TABELA FORMATADA
-                st.subheader("📑 Detalhamento com Alerta de Proximidade")
-                st.caption("🚩 Linhas destacadas indicam pagamentos próximos (± 5 dias) a comunicações do RIF.")
-
+                # Estilo: Texto Preto sobre Fundo Amarelo para legibilidade
                 def style_proximidade(row):
-                    return ['background-color: #fff3cd; font-weight: bold'] * len(row) if row['Alerta_Temporal'] else [''] * len(row)
+                    if row['Alerta_Temporal']:
+                        return ['background-color: #fff3cd; color: black; font-weight: bold'] * len(row)
+                    return [''] * len(row)
 
-                cols_viz = [c for c in ['data', 'orgaoSuperior', 'valor', 'documento', 'observacao'] if c in df_res.columns]
                 st.dataframe(
-                    df_res.style.apply(style_proximidade, axis=1),
-                    use_container_width=True,
-                    hide_index=True
+                    df_res[['data', 'orgaoSuperior', 'valor', 'documento', 'observacao', 'Alerta_Temporal']]
+                    .style.apply(style_proximidade, axis=1)
+                    .hide(['Alerta_Temporal'], axis="columns"),
+                    use_container_width=True, hide_index=True
                 )
 
-                # 4. GRÁFICO DE LINHA DO TEMPO (Nexo Causal)
+                # --- SESSÃO 3: GRÁFICO MENSAL (CORREÇÃO DE VALORES) ---
                 st.markdown("---")
-                st.subheader(f"📅 Linha do Tempo: Nexo Causal")
+                st.subheader(f"📅 Linha do Tempo Mensal: Sinalização de Alertas")
                 
                 import plotly.graph_objects as go
                 
-                # Filtra os dados do RIF para o MESMO período selecionado no 'data_range'
-                df_rif_plot = st.session_state.df_final[
-                    (st.session_state.df_final['cpfCnpjEnvolvido'] == cpf_cnpj_alvo) &
-                    (st.session_state.df_final['Data_da_operacao'].dt.date >= data_range[0]) &
-                    (st.session_state.df_final['Data_da_operacao'].dt.date <= data_range[1])
-                ].copy()
-
-                df_portal_plot = df_res.copy()
-                df_portal_plot['data_dt'] = pd.to_datetime(df_portal_plot['data'], format='%d/%m/%Y')
+                # 1. Agrupamento Mensal dos Pagamentos
+                df_portal_m = df_res.groupby('mes_ref')['valor_float'].sum().reset_index()
+                max_val_portal = df_portal_m['valor_float'].max() if not df_portal_m.empty else 1000
                 
+                # 2. Agrupamento Mensal do RIF com REMOÇÃO DE DUPLICATAS
+                df_rif_all = st.session_state.df_final[mask_rif_alvo].copy()
+                df_rif_all['mes_ref'] = df_rif_all['Data_da_operacao'].dt.to_period('M').dt.to_timestamp()
+                
+                # --- CORREÇÃO CRUCIAL ---
+                # Removemos as linhas duplicadas por comunicação antes de somar os valores
+                df_rif_unique = df_rif_all.drop_duplicates(subset=['idComunicacao'])
+                
+                df_rif_m = df_rif_unique.groupby('mes_ref').agg({
+                    'ValorTotal': 'sum',
+                    'idComunicacao': 'count'
+                }).reset_index()
+
+                # 3. Desenho do Gráfico (Sinalização de Teto)
+                altura_fixa = max_val_portal * 1.05
                 fig_timeline = go.Figure()
                 
-                # Adicionar Barras (Créditos da União)
+                # Barras de Pagamento
                 fig_timeline.add_trace(go.Bar(
-                    x=df_portal_plot['data_dt'],
-                    y=df_portal_plot['valor_float'],
-                    name='💰 Crédito União',
-                    marker_color='#2ECC71'
+                    x=df_portal_m['mes_ref'], y=df_portal_m['valor_float'],
+                    name='💰 Recebimento União', marker_color='#2ECC71'
                 ))
 
-                # Adicionar Pontos (Alertas RIF filtrados pelo período)
-                fig_timeline.add_trace(go.Scatter(
-                    x=df_rif_plot['Data_da_operacao'],
-                    y=df_rif_plot['ValorTotal'],
-                    mode='markers',
-                    name='🚩 Alerta RIF',
-                    marker=dict(size=12, color='#E74C3C', symbol='diamond')
-                ))
+                # Diamantes no Teto com Valores Corrigidos
+                if not df_rif_m.empty:
+                    fig_timeline.add_trace(go.Scatter(
+                        x=df_rif_m['mes_ref'], y=[altura_fixa] * len(df_rif_m),
+                        mode='markers', name='🚩 Alerta COAF (RIF)',
+                        marker=dict(size=18, color='#E74C3C', symbol='diamond', line=dict(width=2, color='white')),
+                        # O hover agora mostrará o valor real somado das comunicações únicas
+                        hovertemplate="<b>ALERTA IDENTIFICADO</b><br>Mês: %{x|%m/%Y}<br>Valor: R$ %{text}<extra></extra>",
+                        text=[f"{v:,.2f}" for v in df_rif_m['ValorTotal']]
+                    ))
 
-                # Configura o eixo X para respeitar rigorosamente o intervalo da tabela
                 fig_timeline.update_layout(
-                    template="plotly_white", 
-                    hovermode="x unified", 
-                    height=450,
-                    xaxis=dict(
-                        title="Período da Diligência",
-                        range=[data_range[0], data_range[1]],
-                        type='date'
-                    ),
-                    yaxis=dict(title="Valor (R$)"),
+                    template="plotly_white", hovermode="x unified", height=500,
+                    xaxis=dict(title="Mês/Ano", tickformat="%m/%Y", range=[pd.Timestamp(2022,1,1), pd.Timestamp.now()]),
+                    yaxis=dict(title="Volume (R$)", range=[0, altura_fixa * 1.1]),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig_timeline, use_container_width=True)
-            
-            
-            elif 'df_pagamentos_resultado' in st.session_state:
-                st.info("Nenhum registro encontrado no Portal para este período.")
-                
+
+        elif 'df_pagamentos_resultado' in st.session_state:
+            st.info("Nenhum registro encontrado.")
         else:
-            st.warning("⚠️ Por favor, processe os arquivos CSV na barra lateral primeiro para habilitar a diligência.")
-
-
-            
-    # --- Seção de Exportação (Fora das Abas) ---
-    if not df_display.empty:
-        st.divider()
-        st.header("📤 Exportar Resultados (Baseado nos Dados Filtrados)")
-        export_button = st.button("Gerar Relatório Excel (Filtrado)")
-
-        if export_button:
-            with st.spinner("Gerando arquivo Excel..."):
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"relatorio_RIF_filtrado_{timestamp}.xlsx"
-
-                try:
-                    with pd.ExcelWriter(filename) as writer:
-                        df_display_export = df_display.copy()
-                        cols_to_drop = ['IdadeConta', 'CidadeAgenciaNorm', 'Período']
-                        fmt_cols = [f'Valor{c}_fmt' for c in ['A','B','C','D','E']]
-                        cols_to_drop.extend([c for c in fmt_cols if c in df_display_export.columns])
-                        df_display_export = df_display_export.drop(columns=[col for col in cols_to_drop if col in df_display_export.columns], errors='ignore')
-                        df_display_export.to_excel(writer, sheet_name='Dados Consolidados Filtrados', index=False)
-
-                        # Usar variáveis locais se existirem e não estiverem vazias
-                        if 'transactions_final_agg' in locals() and not transactions_final_agg.empty:
-                            transactions_final_agg.to_excel(writer, sheet_name='Transações por Ocorrência', index=False)
-                        if 'segment_communications' in locals() and not segment_communications.empty:
-                            segment_communications.to_excel(writer, sheet_name='Comunicações por Segmento', index=False)
-
-                        # Recalcular Top 10s para exportação
-                        top_envolvidos_exp = df_display.groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                            Qtd_Comunicacoes=('idComunicacao', 'nunique'),
-                            Valor_Total_A=('ValorTotal', 'sum')
-                        ).reset_index()
-                        top_envolvidos_exp = top_envolvidos_exp[top_envolvidos_exp['cpfCnpjEnvolvido'] != 'DESCONHECIDO']
-                        top_envolvidos_exp = top_envolvidos_exp.sort_values('Qtd_Comunicacoes', ascending=False).head(10)
-                        if not top_envolvidos_exp.empty: top_envolvidos_exp.to_excel(writer, sheet_name='Top 10 Envolvidos', index=False)
-
-                        if 'city_communications' in locals() and not city_communications.empty:
-                            city_communications.to_excel(writer, sheet_name='Comunicações por Cidade', index=False)
-
-                        if 'tipoEnvolvido' in df_display.columns:
-                            depositantes_exp = df_display[df_display['tipoEnvolvido'].str.lower() == 'depositante'].groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                                Valor_Total_A=('ValorTotal', 'sum')
-                            ).reset_index()
-                            depositantes_exp = depositantes_exp[depositantes_exp['cpfCnpjEnvolvido'] != 'DESCONHECIDO']
-                            depositantes_exp = depositantes_exp.sort_values('Valor_Total_A', ascending=False).head(10)
-                            if not depositantes_exp.empty: depositantes_exp.to_excel(writer, sheet_name='Top 10 Depositantes', index=False)
-
-                            sacadores_exp = df_display[df_display['tipoEnvolvido'].str.lower() == 'sacador'].groupby(['cpfCnpjEnvolvido', 'nomeEnvolvido']).agg(
-                                Valor_Total_A=('ValorTotal', 'sum')
-                            ).reset_index()
-                            sacadores_exp = sacadores_exp[sacadores_exp['cpfCnpjEnvolvido'] != 'DESCONHECIDO']
-                            sacadores_exp = sacadores_exp.sort_values('Valor_Total_A', ascending=False).head(10)
-                            if not sacadores_exp.empty: sacadores_exp.to_excel(writer, sheet_name='Top 10 Sacadores', index=False)
-
-                        # Recalcular padrões suspeitos para garantir que estão atualizados
-                        suspicious_df_to_export = analyze_suspicious_patterns(
-                            df_display, # Usa o dataframe filtrado atual
-                            st.session_state.df_ocorrencias,
-                            st.session_state.df_comunicacoes,
-                            st.session_state.df_envolvidos
-                        )
-                        if suspicious_df_to_export is not None and not suspicious_df_to_export.empty:
-                            suspicious_df_to_export.to_excel(writer, sheet_name='Padrões Suspeitos Filtrados', index=False)
-
-                        df_segmento_desc.to_excel(writer, sheet_name='Legenda Segmentos', index=False)
-
-
-                    with open(filename, "rb") as fp:
-                        st.download_button(
-                            label="Baixar Relatório Filtrado",
-                            data=fp,
-                            file_name=filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    st.success(f"Relatório '{filename}' gerado com sucesso!")
-                except Exception as e:
-                     st.error(f"Erro ao gerar o arquivo Excel: {e}")
-                     st.code(traceback.format_exc())
-    else:
-        st.info("Aplique filtros que retornem dados para habilitar a exportação.")
-
-
-
+            st.warning("⚠️ Carregue os arquivos RIF na barra lateral primeiro.")
 
 # --- Mensagem se nenhum arquivo foi carregado ou botão não pressionado ---
 elif not process_button and not st.session_state.data_loaded:
