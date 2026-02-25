@@ -2011,6 +2011,38 @@ def extrair_capital_social(texto):
         try: return float(val_limpo)
         except: return 0.0
     return 0.0
+    
+def extrair_renda_mensal(texto):
+    """Extrai a Renda Mensal declarada em narrativas para Pessoas Físicas."""
+    if pd.isna(texto): return 0.0
+    # Procura padrões como "renda mensal de R$ 5.000,00" ou "rendimento de R$ 2.500"
+    padrao = r"(?:renda|rendimento)\s+mensal\s*(?:\(.*?\))?\s*(?:de|:)?\s*R\$\s*(?P<val>[\d.,]+)"
+    match = re.search(padrao, str(texto), re.IGNORECASE)
+    if match:
+        val_str = match.group('val')
+        val_limpo = val_str.replace('.', '').replace(',', '.')
+        try: return float(val_limpo)
+        except: return 0.0
+    return 0.0
+
+def extrair_faturamento(texto):
+    """Extrai o Faturamento (Anual ou Mensal) declarado em narrativas."""
+    if pd.isna(texto): return 0.0
+    # Procura padrões como "faturamento anual de R$ 1.000.000,00" ou "faturamento de R$ 50.000"
+    padrao = r"faturamento\s+(?:anual|mensal)?\s*(?:\(.*?\))?\s*(?:de|:)?\s*R\$\s*(?P<val>[\d.,]+)"
+    match = re.search(padrao, str(texto), re.IGNORECASE)
+    
+    if match:
+        val_str = match.group('val')
+        val_limpo = val_str.replace('.', '').replace(',', '.')
+        try:
+            valor = float(val_limpo)
+            # Se a narrativa explicitamente disser "mensal", anualizamos
+            if "mensal" in match.group(0).lower():
+                return valor * 12
+            return valor
+        except: return 0.0
+    return 0.0
 
 def analise_benford(df):
     """Calcula e plota a Lei de Benford para os valores das transações."""
@@ -3488,27 +3520,53 @@ if st.session_state.data_loaded:
                 col4_ind.metric("Pessoa Obrigada", "Sim" if obr_flag else "Não")
                 col5_ind.metric("Servidor Público", "Sim" if ser_flag else "Não")
                 
-                # --- NOVO: CÁLCULO DE ALAVANCAGEM SOB DEMANDA ---
-                # Executa o Regex apenas para as comunicações deste envolvido específico
-                cap_social_ind = envolvido_data['informacoesAdicionais'].apply(extrair_capital_social).max()
-                
-                if cap_social_ind > 0:
-                    alavancagem_ind = valor_total_ind_real / cap_social_ind
+                # --- CÁLCULO DE ALAVANCAGEM SOB DEMANDA ---
+                # --- NOVO: FILTRO DE PAPEL PARA ALAVANCAGEM ---
+                # Verificamos se o alvo atua como Titular ou Sócio em alguma das comunicações filtradas
+                papeis_alvo = envolvido_data['tipoEnvolvido'].astype(str).str.lower().str.strip().unique()
+                is_protagonista = any(p in ['titular', 'titular da conta', 'sócio', 'socio'] for p in papeis_alvo)
+                    
+                if is_protagonista:
+                    # --- INTELIGÊNCIA FINANCEIRA EXPANDIDA (PJ e PF) ---
+                    faturamento_anual = envolvido_data['informacoesAdicionais'].apply(extrair_faturamento).max()
+                    cap_social = envolvido_data['informacoesAdicionais'].apply(extrair_capital_social).max()
+                    renda_mensal = envolvido_data['informacoesAdicionais'].apply(extrair_renda_mensal).max()
                     
                     st.markdown("---")
-                    c_al1, c_al2 = st.columns([1, 2])
-                    
-                    with c_al1:
-                        st.metric("Capital Social Identificado", f"R$ {cap_social_ind:,.2f}")
-                    
-                    with c_al2:
-                        # Exibição de Alerta Crítico
-                        if alavancagem_ind > 100:
-                            st.error(f"🚩 **ALERTA DE ALAVANCAGEM CRÍTICA:** Este alvo movimentou **{alavancagem_ind:.1f} vezes** o seu capital social declarado.")
-                            st.caption("Indício de empresa de fachada ou conta de passagem utilizada para ocultação de valores.")
-                        else:
-                            st.success(f"Índice de Alavancagem: {alavancagem_ind:.1f}x o Capital Social.")
+                    c_det1, c_det2 = st.columns([1, 2])
 
+                    # REGRA 1: Pessoa Jurídica (Prioridade para Faturamento)
+                    if faturamento_anual > 0 or cap_social > 0:
+                        # Usamos o faturamento como base principal; se não houver, usamos capital
+                        base_comparacao = faturamento_anual if faturamento_anual > 0 else cap_social
+                        label_base = "Faturamento Anual" if faturamento_anual > 0 else "Capital Social"
+                        
+                        alavancagem_pj = valor_total_ind_real / base_comparacao
+                        
+                        with c_det1:
+                            st.metric(f"{label_base} Identificado", f"R$ {base_comparacao:,.2f}")
+                        
+                        with c_det2:
+                            # Alerta PLD: Movimentar mais que 5x o faturamento anual é crítico para empresas
+                            threshold = 5 if faturamento_anual > 0 else 100
+                            if alavancagem_pj > threshold:
+                                st.error(f"🚩 **INCOMPATIBILIDADE OPERACIONAL:** Movimentação **{alavancagem_pj:.1f}x** superior ao {label_base}.")
+                                st.caption("Empresas que transacionam múltiplos do faturamento anual em curtos períodos sugerem lavagem de dinheiro ou fracionamento.")
+                            else:
+                                st.success(f"Índice de Compatibilidade PJ: {alavancagem_pj:.1f}x")
+
+                    # REGRA 2: Pessoa Física (Renda Mensal Anualizada)
+                    elif renda_mensal > 0:
+                        alavancagem_pf = valor_total_ind_real / (renda_mensal * 12)
+                        with c_det1:
+                            st.metric("Renda Mensal Declarada", f"R$ {renda_mensal:,.2f}")
+                        with c_det2:
+                            if alavancagem_pf > 10:
+                                st.error(f"🚩 **INCOMPATIBILIDADE PATRIMONIAL:** Movimentação **{alavancagem_pf:.1f}x** superior à Renda Anual.")
+                            else:
+                                st.info(f"Compatibilidade Financeira: {alavancagem_pf:.1f}x a Renda Anual.")    
+                                        
+                
                 # Comunicações
                 st.markdown("---")
                 pessoa_selecionada = selected_cpf_individual
