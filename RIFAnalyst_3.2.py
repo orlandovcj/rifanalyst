@@ -2277,7 +2277,8 @@ def fetch_portal_transparencia_data(cpf_cnpj, data_inicio, data_fim):
     
     # 3. Headers em formato de DICIONÁRIO (Crucial para evitar erro de 'list')
     try:
-        token = st.secrets["portal_transparencia_token"]
+        token = "b5bc88379d5d7cf3686d3754bb67c7fb"  # EXCLUIR APÓS TESTE
+        #token = st.secrets["portal_transparencia_token"]
     except:
         st.error("Chave da API não encontrada no arquivo secrets.toml")
         return pd.DataFrame()
