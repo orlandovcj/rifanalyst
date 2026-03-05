@@ -3323,14 +3323,14 @@ if st.session_state.data_loaded:
 
                 df_ranking = df_ranking.sort_values('ScoreTotal', ascending=False).reset_index(drop=True)
 
-                # --- Triagem Automática Corrigida (Usa o Top 30 do Score Total) ---
+                # --- Triagem Automática Corrigida (Usa o Top 10 do Score Total) ---
                 if not st.session_state.get('alerts_processed', False):
-                    top_30_alvos = df_ranking.head(30)
+                    top_30_alvos = df_ranking.head(10)
                     
                     if 'cpfs_com_alerta_publico' not in st.session_state:
                         st.session_state.cpfs_com_alerta_publico = set()
 
-                    with st.status("🏛️ Portal da Transparência: Verificando Top 30...") as status:
+                    with st.status("🏛️ Portal da Transparência: Verificando Top 10...") as status:
                         progresso = st.progress(0)
                         total = len(top_30_alvos)
                         ano_atual = pd.Timestamp.now().year
@@ -3341,7 +3341,7 @@ if st.session_state.data_loaded:
                             if doc:
                                 # Realiza a busca em cascata nos anos de interesse
                                 found_payment = False
-                                for ano in range(2022, ano_atual + 1):
+                                for ano in range(2021, ano_atual + 1):
                                     # Consulta o exercício específico conforme a lógica da Aba 8
                                     res = fetch_portal_transparencia_data(doc, pd.Timestamp(year=ano, month=1, day=1), None)
                                     
@@ -4004,7 +4004,7 @@ if st.session_state.data_loaded:
     with tab_pagamentos:
         st.header("🔍 Pagamentos - Portal da Transparência")
         st.markdown("""
-        Esta ferramenta realiza uma busca pelos pagamentos *no período 2022-2026** cruzando os dados do RIF com 
+        Esta ferramenta realiza uma busca pelos pagamentos *no período 2021-2026** cruzando os dados do RIF com 
         recebimentos do Governo Federal.
         """)
 
@@ -4023,13 +4023,13 @@ if st.session_state.data_loaded:
             # Removemos pontos/traços da coluna do DataFrame para comparar com doc_alvo
             mask_rif_alvo = st.session_state.df_final['cpfCnpjEnvolvido'].str.replace(r'\D', '', regex=True).str.contains(doc_alvo)
 
-            # 2. Execução da Busca Automática (2022-2026)
+            # 2. Execução da Busca Automática (2021-2026)
             if st.button("🚀 Iniciar Busca"):
                 ano_atual = pd.Timestamp.now().year
                 lista_resultados = []
                 
                 with st.status(f"📡 Consultando base da CGU para {selecionado}...") as status:
-                    for ano in range(2022, ano_atual + 1):
+                    for ano in range(2021, ano_atual + 1):
                         status.write(f"Buscando exercício {ano}...")
                         df_ano = fetch_portal_transparencia_data(doc_alvo, pd.Timestamp(year=ano, month=1, day=1), None)
                         if not df_ano.empty:
@@ -4059,7 +4059,7 @@ if st.session_state.data_loaded:
                 total_geral = df_res['valor_float'].sum()
 
                 c1, c2 = st.columns([1, 2])
-                c1.metric("Total Geral (2022-2026)", f"R$ {total_geral:,.2f}")
+                c1.metric("Total Geral (2021-2026)", f"R$ {total_geral:,.2f}")
                 c2.table(resumo_anual.style.format({'valor_float': 'R$ {:,.2f}'}))
 
                 # --- TABELA COM ALERTA (M ou M+1) ---
