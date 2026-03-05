@@ -4136,7 +4136,7 @@ if st.session_state.data_loaded:
 
                 fig_timeline.update_layout(
                     template="plotly_white", hovermode="x unified", height=500,
-                    xaxis=dict(title="Mês/Ano", tickformat="%m/%Y", range=[pd.Timestamp(2022,1,1), pd.Timestamp.now()]),
+                    xaxis=dict(title="Mês/Ano", tickformat="%m/%Y", range=[pd.Timestamp(2021,1,1), pd.Timestamp.now()]),
                     yaxis=dict(title="Volume (R$)", range=[0, altura_fixa * 1.1]),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
