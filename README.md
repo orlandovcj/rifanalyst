@@ -58,7 +58,7 @@ Módulo de enriquecimento de dados que cruza as informações dos envolvidos no 
 
 ### 🗺️ Trilhas da DIE
 
-Ferramenta dedicada à análise de planilhas de **Detalhamento de Indícios de Irregularidades (DIE)**, geralmente em formato Excel.
+Ferramenta dedicada à análise de planilhas da dados complementares da Diretoria de Informações Estratégicas (DIE), geralmente em formato Excel.
 -   **Filtros de Alvos e Comunicações:** Permite focar a análise em pessoas ou comunicações específicas.
 -   **Rede de Vínculos:** Gera uma rede interativa que conecta pessoas, empresas e comunicações, ajudando a visualizar relacionamentos complexos.
 -   **Exploração de Dados:** Apresenta os dados brutos de cada trilha (aba da planilha), com resumos e gráficos específicos para temas como Recursos Federais e Emendas Parlamentares.
