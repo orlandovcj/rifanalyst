@@ -1,1 +1,37 @@
+# Python Caches e Arquivos de Compilação
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Ambientes Virtuais (Virtual Environments)
+.venv/
+venv/
+env/
+ENV/
+lib/
+bin/
+include/
+pip-selfcheck.json
+
+# Streamlit e Configurações Locais
+.streamlit/config.toml
 .streamlit/secrets.toml
+
+# Configurações de IDEs (VS Code, PyCharm, etc.)
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.env
+# Arquivos do Sistema Operacional
+.DS_Store
+Thumbs.db
+
+# Logs e Arquivos Temporários
+*.log
+*.tmp
+temp/
